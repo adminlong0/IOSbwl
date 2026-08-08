@@ -1,8 +1,7 @@
 import 'dart:convert';
-import 'dart:ui';
 
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -14,22 +13,15 @@ class LiquidNotesApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return CupertinoApp(
-      title: 'Liquid Notes',
+    return const CupertinoApp(
+      title: '备忘录',
       debugShowCheckedModeBanner: false,
-      theme: const CupertinoThemeData(
+      theme: CupertinoThemeData(
         brightness: Brightness.light,
-        primaryColor: Color(0xFF0E7AFE),
-        scaffoldBackgroundColor: Color(0xFFF7F5EF),
-        textTheme: CupertinoTextThemeData(
-          navLargeTitleTextStyle: TextStyle(
-            color: Color(0xFF191916),
-            fontSize: 34,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
+        primaryColor: CupertinoColors.systemYellow,
+        scaffoldBackgroundColor: CupertinoColors.systemGroupedBackground,
       ),
-      home: const NotesHomePage(),
+      home: NotesHomePage(),
     );
   }
 }
@@ -43,7 +35,7 @@ class Note {
     required this.updatedAt,
     this.isPinned = false,
     this.isFavorite = false,
-    this.color = 0xFFFFD966,
+    this.reminderAt,
   });
 
   final String id;
@@ -53,7 +45,7 @@ class Note {
   DateTime updatedAt;
   bool isPinned;
   bool isFavorite;
-  int color;
+  DateTime? reminderAt;
 
   factory Note.fromJson(Map<String, dynamic> json) {
     return Note(
@@ -68,7 +60,7 @@ class Note {
           DateTime.now(),
       isPinned: json['isPinned'] as bool? ?? false,
       isFavorite: json['isFavorite'] as bool? ?? false,
-      color: json['color'] as int? ?? 0xFFFFD966,
+      reminderAt: DateTime.tryParse(json['reminderAt'] as String? ?? ''),
     );
   }
 
@@ -81,13 +73,13 @@ class Note {
       'updatedAt': updatedAt.toIso8601String(),
       'isPinned': isPinned,
       'isFavorite': isFavorite,
-      'color': color,
+      'reminderAt': reminderAt?.toIso8601String(),
     };
   }
 }
 
 class NotesStore {
-  static const _storageKey = 'liquid_notes_items';
+  static const _storageKey = 'liquid_notes_items_v2';
 
   Future<List<Note>> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -115,22 +107,73 @@ class NotesStore {
     return [
       Note(
         id: 'welcome',
-        title: '今天的灵感',
-        body: '把零碎想法先记下来，再慢慢整理。轻点右下角可以新建备忘录。',
+        title: '今天的想法',
+        body: '用系统控件写下事情本身。需要安排时间时，可以把备忘录加入日历、提醒事项或通知。',
         createdAt: now,
         updatedAt: now,
         isPinned: true,
-        color: 0xFFFFD166,
       ),
       Note(
-        id: 'glass',
-        title: '液态玻璃设计',
-        body: '半透明层、背景模糊、柔和边缘和浮动控制，让界面像贴在内容上方的玻璃。',
-        createdAt: now.subtract(const Duration(hours: 2)),
-        updatedAt: now.subtract(const Duration(hours: 2)),
-        color: 0xFF8EECF5,
+        id: 'native',
+        title: 'Apple 风格重构',
+        body: '界面采用 Large Title、分组列表、底部操作表和系统色，尽量让体验接近第一方 iOS 应用。',
+        createdAt: now.subtract(const Duration(hours: 3)),
+        updatedAt: now.subtract(const Duration(hours: 3)),
       ),
     ];
+  }
+}
+
+class AppleServices {
+  AppleServices._();
+
+  static const _channel = MethodChannel('liquid_notes/apple_services');
+
+  static Future<String> createCalendarEvent(Note note) async {
+    final start =
+        note.reminderAt ?? DateTime.now().add(const Duration(hours: 1));
+    final result = await _channel.invokeMethod<String>('createCalendarEvent', {
+      'title': note.title,
+      'body': note.body,
+      'start': start.toIso8601String(),
+      'end': start.add(const Duration(minutes: 30)).toIso8601String(),
+    });
+    return result ?? '已加入日历';
+  }
+
+  static Future<String> createReminder(Note note) async {
+    final due = note.reminderAt ?? DateTime.now().add(const Duration(hours: 1));
+    final result = await _channel.invokeMethod<String>('createReminder', {
+      'title': note.title,
+      'body': note.body,
+      'due': due.toIso8601String(),
+    });
+    return result ?? '已加入提醒事项';
+  }
+
+  static Future<String> scheduleNotification(Note note) async {
+    final fireAt =
+        note.reminderAt ?? DateTime.now().add(const Duration(minutes: 5));
+    final result = await _channel.invokeMethod<String>('scheduleNotification', {
+      'id': note.id,
+      'title': note.title,
+      'body': note.body,
+      'fireAt': fireAt.toIso8601String(),
+    });
+    return result ?? '通知已安排';
+  }
+
+  static Future<String> startLiveActivity(Note note) async {
+    final result = await _channel.invokeMethod<String>('startLiveActivity', {
+      'title': note.title,
+      'body': note.body,
+    });
+    return result ?? '实时活动已启动';
+  }
+
+  static Future<String> endLiveActivity() async {
+    final result = await _channel.invokeMethod<String>('endLiveActivity');
+    return result ?? '实时活动已结束';
   }
 }
 
@@ -170,17 +213,15 @@ class _NotesHomePageState extends State<NotesHomePage> {
     });
   }
 
-  Future<void> _persist() async {
-    await _store.save(_notes);
-  }
+  Future<void> _persist() => _store.save(_notes);
 
   List<Note> get _visibleNotes {
-    final lowerQuery = _query.trim().toLowerCase();
-    final filtered = lowerQuery.isEmpty
-        ? _notes
+    final query = _query.trim().toLowerCase();
+    final filtered = query.isEmpty
+        ? [..._notes]
         : _notes.where((note) {
-            return note.title.toLowerCase().contains(lowerQuery) ||
-                note.body.toLowerCase().contains(lowerQuery);
+            return note.title.toLowerCase().contains(query) ||
+                note.body.toLowerCase().contains(query);
           }).toList();
 
     filtered.sort((a, b) {
@@ -196,7 +237,6 @@ class _NotesHomePageState extends State<NotesHomePage> {
     final result = await Navigator.of(context).push<Note?>(
       CupertinoPageRoute(builder: (_) => NoteEditorPage(note: note)),
     );
-
     if (result == null) {
       return;
     }
@@ -227,80 +267,430 @@ class _NotesHomePageState extends State<NotesHomePage> {
     await _persist();
   }
 
+  Future<void> _showNoteActions(Note note) async {
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (context) => NoteActionSheet(
+        note: note,
+        onCalendar: () => _runAppleService(
+          context,
+          () => AppleServices.createCalendarEvent(note),
+        ),
+        onReminder: () =>
+            _runAppleService(context, () => AppleServices.createReminder(note)),
+        onNotification: () => _runAppleService(
+          context,
+          () => AppleServices.scheduleNotification(note),
+        ),
+        onLiveActivity: () => _runAppleService(
+          context,
+          () => AppleServices.startLiveActivity(note),
+        ),
+        onEndLiveActivity: () =>
+            _runAppleService(context, AppleServices.endLiveActivity),
+      ),
+    );
+  }
+
+  Future<void> _runAppleService(
+    BuildContext sheetContext,
+    Future<String> Function() action,
+  ) async {
+    Navigator.of(sheetContext).pop();
+    try {
+      final message = await action();
+      if (mounted) {
+        _showStatus(message);
+      }
+    } on PlatformException catch (error) {
+      if (mounted) {
+        _showStatus(error.message ?? '系统服务暂不可用');
+      }
+    }
+  }
+
+  void _showStatus(String message) {
+    showCupertinoDialog<void>(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('完成'),
+        content: Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Text(message),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('好'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
-      child: Stack(
-        children: [
-          const LiquidBackground(),
-          SafeArea(
-            bottom: false,
-            child: CustomScrollView(
-              slivers: [
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
-                  sliver: SliverToBoxAdapter(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          '备忘录',
-                          style: TextStyle(
-                            fontSize: 36,
-                            fontWeight: FontWeight.w800,
-                            color: Color(0xFF191916),
-                          ),
-                        ),
-                        const SizedBox(height: 14),
-                        LiquidSearchField(
-                          controller: _searchController,
-                          onChanged: (value) => setState(() => _query = value),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                if (_isLoading)
-                  const SliverFillRemaining(
-                    child: Center(child: CupertinoActivityIndicator()),
-                  )
-                else if (_visibleNotes.isEmpty)
-                  SliverFillRemaining(
-                    hasScrollBody: false,
-                    child: EmptyNotesView(onCreate: () => _openEditor()),
-                  )
-                else
-                  SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 118),
-                    sliver: SliverList.separated(
-                      itemBuilder: (context, index) {
-                        final note = _visibleNotes[index];
-                        return NoteCard(
-                          note: note,
-                          onTap: () => _openEditor(note),
-                          onPin: () => _togglePin(note),
-                          onFavorite: () => _toggleFavorite(note),
-                          onDelete: () => _delete(note),
-                        );
-                      },
-                      separatorBuilder: (_, _) => const SizedBox(height: 12),
-                      itemCount: _visibleNotes.length,
-                    ),
-                  ),
-              ],
+      backgroundColor: CupertinoColors.systemGroupedBackground,
+      child: CustomScrollView(
+        slivers: [
+          CupertinoSliverNavigationBar(
+            largeTitle: const Text('备忘录'),
+            trailing: CupertinoButton(
+              padding: EdgeInsets.zero,
+              onPressed: () => _openEditor(),
+              child: const Icon(CupertinoIcons.square_pencil),
             ),
           ),
-          Positioned(
-            left: 20,
-            right: 20,
-            bottom: 22,
-            child: LiquidToolbar(
-              count: _notes.length,
-              onCreate: () => _openEditor(),
+          SliverSafeArea(
+            top: false,
+            sliver: SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
+              sliver: SliverList.list(
+                children: [
+                  CupertinoSearchTextField(
+                    controller: _searchController,
+                    placeholder: '搜索',
+                    onChanged: (value) => setState(() => _query = value),
+                  ),
+                  const SizedBox(height: 18),
+                  if (_isLoading)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 80),
+                      child: CupertinoActivityIndicator(),
+                    )
+                  else if (_visibleNotes.isEmpty)
+                    EmptyNotesView(onCreate: () => _openEditor())
+                  else ...[
+                    NotesSummary(notes: _notes),
+                    const SizedBox(height: 18),
+                    NotesSection(
+                      title: _query.isEmpty ? '全部' : '搜索结果',
+                      notes: _visibleNotes,
+                      onOpen: _openEditor,
+                      onPin: _togglePin,
+                      onFavorite: _toggleFavorite,
+                      onDelete: _delete,
+                      onMore: _showNoteActions,
+                    ),
+                  ],
+                ],
+              ),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class NotesSummary extends StatelessWidget {
+  const NotesSummary({required this.notes, super.key});
+
+  final List<Note> notes;
+
+  @override
+  Widget build(BuildContext context) {
+    final pinned = notes.where((note) => note.isPinned).length;
+    final reminders = notes.where((note) => note.reminderAt != null).length;
+
+    return Row(
+      children: [
+        Expanded(
+          child: SummaryTile(
+            value: notes.length.toString(),
+            label: '备忘录',
+            icon: CupertinoIcons.doc_text,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: SummaryTile(
+            value: pinned.toString(),
+            label: '置顶',
+            icon: CupertinoIcons.pin,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: SummaryTile(
+            value: reminders.toString(),
+            label: '提醒',
+            icon: CupertinoIcons.bell,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class SummaryTile extends StatelessWidget {
+  const SummaryTile({
+    required this.value,
+    required this.label,
+    required this.icon,
+    super.key,
+  });
+
+  final String value;
+  final String label;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: CupertinoColors.secondarySystemGroupedBackground,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 20, color: CupertinoColors.systemGrey),
+            const SizedBox(height: 14),
+            Text(
+              value,
+              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 13,
+                color: CupertinoColors.secondaryLabel,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class NotesSection extends StatelessWidget {
+  const NotesSection({
+    required this.title,
+    required this.notes,
+    required this.onOpen,
+    required this.onPin,
+    required this.onFavorite,
+    required this.onDelete,
+    required this.onMore,
+    super.key,
+  });
+
+  final String title;
+  final List<Note> notes;
+  final ValueChanged<Note> onOpen;
+  final ValueChanged<Note> onPin;
+  final ValueChanged<Note> onFavorite;
+  final ValueChanged<Note> onDelete;
+  final ValueChanged<Note> onMore;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 8),
+          child: Text(
+            title.toUpperCase(),
+            style: const TextStyle(
+              color: CupertinoColors.secondaryLabel,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: DecoratedBox(
+            decoration: const BoxDecoration(
+              color: CupertinoColors.secondarySystemGroupedBackground,
+            ),
+            child: Column(
+              children: [
+                for (var index = 0; index < notes.length; index++) ...[
+                  NoteRow(
+                    note: notes[index],
+                    onOpen: () => onOpen(notes[index]),
+                    onPin: () => onPin(notes[index]),
+                    onFavorite: () => onFavorite(notes[index]),
+                    onDelete: () => onDelete(notes[index]),
+                    onMore: () => onMore(notes[index]),
+                  ),
+                  if (index != notes.length - 1)
+                    const Padding(
+                      padding: EdgeInsets.only(left: 58),
+                      child: Separator(),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class NoteRow extends StatelessWidget {
+  const NoteRow({
+    required this.note,
+    required this.onOpen,
+    required this.onPin,
+    required this.onFavorite,
+    required this.onDelete,
+    required this.onMore,
+    super.key,
+  });
+
+  final Note note;
+  final VoidCallback onOpen;
+  final VoidCallback onPin;
+  final VoidCallback onFavorite;
+  final VoidCallback onDelete;
+  final VoidCallback onMore;
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoContextMenu(
+      actions: [
+        CupertinoContextMenuAction(
+          onPressed: () {
+            Navigator.of(context).pop();
+            onPin();
+          },
+          trailingIcon: note.isPinned
+              ? CupertinoIcons.pin_slash
+              : CupertinoIcons.pin,
+          child: Text(note.isPinned ? '取消置顶' : '置顶'),
+        ),
+        CupertinoContextMenuAction(
+          onPressed: () {
+            Navigator.of(context).pop();
+            onFavorite();
+          },
+          trailingIcon: note.isFavorite
+              ? CupertinoIcons.star_slash
+              : CupertinoIcons.star,
+          child: Text(note.isFavorite ? '取消收藏' : '收藏'),
+        ),
+        CupertinoContextMenuAction(
+          isDestructiveAction: true,
+          onPressed: () {
+            Navigator.of(context).pop();
+            onDelete();
+          },
+          trailingIcon: CupertinoIcons.delete,
+          child: const Text('删除'),
+        ),
+      ],
+      child: CupertinoButton(
+        padding: EdgeInsets.zero,
+        onPressed: onOpen,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+          child: Row(
+            children: [
+              NoteGlyph(isPinned: note.isPinned, isFavorite: note.isFavorite),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            note.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: CupertinoColors.label,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        if (note.reminderAt != null)
+                          const Icon(
+                            CupertinoIcons.bell_fill,
+                            size: 14,
+                            color: CupertinoColors.systemOrange,
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      previewText(note),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: CupertinoColors.secondaryLabel,
+                        fontSize: 14,
+                        height: 1.25,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      formatDate(note.updatedAt),
+                      style: const TextStyle(
+                        color: CupertinoColors.tertiaryLabel,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              CupertinoButton(
+                padding: const EdgeInsets.all(8),
+                onPressed: onMore,
+                child: const Icon(CupertinoIcons.ellipsis_circle),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class NoteGlyph extends StatelessWidget {
+  const NoteGlyph({
+    required this.isPinned,
+    required this.isFavorite,
+    super.key,
+  });
+
+  final bool isPinned;
+  final bool isFavorite;
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = isPinned
+        ? CupertinoIcons.pin_fill
+        : isFavorite
+        ? CupertinoIcons.star_fill
+        : CupertinoIcons.doc_text_fill;
+    final color = isPinned
+        ? CupertinoColors.systemYellow
+        : isFavorite
+        ? CupertinoColors.systemOrange
+        : CupertinoColors.systemGrey3;
+
+    return Container(
+      width: 34,
+      height: 34,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.18),
+        shape: BoxShape.circle,
+      ),
+      child: Icon(icon, color: color, size: 18),
     );
   }
 }
@@ -317,9 +707,9 @@ class NoteEditorPage extends StatefulWidget {
 class _NoteEditorPageState extends State<NoteEditorPage> {
   late final TextEditingController _titleController;
   late final TextEditingController _bodyController;
-  late int _color;
   late bool _isPinned;
   late bool _isFavorite;
+  DateTime? _reminderAt;
 
   bool get _canSave =>
       _titleController.text.trim().isNotEmpty ||
@@ -330,9 +720,9 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
     super.initState();
     _titleController = TextEditingController(text: widget.note?.title ?? '');
     _bodyController = TextEditingController(text: widget.note?.body ?? '');
-    _color = widget.note?.color ?? 0xFFFFD166;
     _isPinned = widget.note?.isPinned ?? false;
     _isFavorite = widget.note?.isFavorite ?? false;
+    _reminderAt = widget.note?.reminderAt;
   }
 
   @override
@@ -361,267 +751,51 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
         updatedAt: now,
         isPinned: _isPinned,
         isFavorite: _isFavorite,
-        color: _color,
+        reminderAt: _reminderAt,
       ),
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return CupertinoPageScaffold(
-      child: Stack(
-        children: [
-          const LiquidBackground(),
-          SafeArea(
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
-                  child: Row(
-                    children: [
-                      GlassIconButton(
-                        icon: CupertinoIcons.chevron_left,
-                        onPressed: () => Navigator.of(context).pop(),
-                      ),
-                      const Spacer(),
-                      GlassIconButton(
-                        icon: _isPinned
-                            ? CupertinoIcons.pin_fill
-                            : CupertinoIcons.pin,
-                        onPressed: () => setState(() => _isPinned = !_isPinned),
-                      ),
-                      const SizedBox(width: 10),
-                      GlassIconButton(
-                        icon: _isFavorite
-                            ? CupertinoIcons.star_fill
-                            : CupertinoIcons.star,
-                        onPressed: () =>
-                            setState(() => _isFavorite = !_isFavorite),
-                      ),
-                      const SizedBox(width: 10),
-                      CupertinoButton(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 11,
-                        ),
-                        color: const Color(0xFF191916),
-                        borderRadius: BorderRadius.circular(22),
-                        onPressed: _save,
-                        child: const Text('完成'),
-                      ),
-                    ],
-                  ),
-                ),
-                Expanded(
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 34),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(30),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-                        child: Container(
-                          decoration: liquidDecoration(
-                            tint: Color(_color).withValues(alpha: 0.22),
-                            radius: 30,
-                          ),
-                          padding: const EdgeInsets.fromLTRB(20, 18, 20, 22),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              ColorPicker(
-                                selected: _color,
-                                onChanged: (value) =>
-                                    setState(() => _color = value),
-                              ),
-                              const SizedBox(height: 12),
-                              CupertinoTextField.borderless(
-                                controller: _titleController,
-                                onChanged: (_) => setState(() {}),
-                                placeholder: '标题',
-                                maxLines: null,
-                                style: const TextStyle(
-                                  fontSize: 30,
-                                  fontWeight: FontWeight.w800,
-                                  color: Color(0xFF191916),
-                                ),
-                              ),
-                              const SizedBox(height: 10),
-                              CupertinoTextField.borderless(
-                                controller: _bodyController,
-                                onChanged: (_) => setState(() {}),
-                                placeholder: '开始记录...',
-                                minLines: 14,
-                                maxLines: null,
-                                keyboardType: TextInputType.multiline,
-                                style: const TextStyle(
-                                  fontSize: 18,
-                                  height: 1.45,
-                                  color: Color(0xFF2D2B27),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class NoteCard extends StatelessWidget {
-  const NoteCard({
-    required this.note,
-    required this.onTap,
-    required this.onPin,
-    required this.onFavorite,
-    required this.onDelete,
-    super.key,
-  });
-
-  final Note note;
-  final VoidCallback onTap;
-  final VoidCallback onPin;
-  final VoidCallback onFavorite;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    return Dismissible(
-      key: ValueKey(note.id),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 24),
-        decoration: BoxDecoration(
-          color: const Color(0xFFFF4D4F),
-          borderRadius: BorderRadius.circular(28),
-        ),
-        child: const Icon(CupertinoIcons.delete, color: Colors.white),
-      ),
-      onDismissed: (_) => onDelete(),
-      child: GestureDetector(
-        onTap: onTap,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(28),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-            child: Container(
-              decoration: liquidDecoration(
-                tint: Color(note.color).withValues(alpha: 0.24),
-                radius: 28,
-              ),
-              padding: const EdgeInsets.all(18),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          note.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w800,
-                            color: Color(0xFF191916),
-                          ),
-                        ),
-                      ),
-                      if (note.isPinned)
-                        const Icon(CupertinoIcons.pin_fill, size: 17),
-                      if (note.isFavorite) ...[
-                        const SizedBox(width: 8),
-                        const Icon(CupertinoIcons.star_fill, size: 17),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    note.body.isEmpty ? '空白备忘录' : note.body,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 16,
-                      height: 1.35,
-                      color: const Color(0xFF2D2B27).withValues(alpha: 0.76),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Text(
-                        formatDate(note.updatedAt),
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: const Color(
-                            0xFF2D2B27,
-                          ).withValues(alpha: 0.58),
-                        ),
-                      ),
-                      const Spacer(),
-                      MiniAction(icon: CupertinoIcons.pin, onPressed: onPin),
-                      const SizedBox(width: 8),
-                      MiniAction(
-                        icon: CupertinoIcons.star,
-                        onPressed: onFavorite,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class LiquidToolbar extends StatelessWidget {
-  const LiquidToolbar({required this.count, required this.onCreate, super.key});
-
-  final int count;
-  final VoidCallback onCreate;
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(30),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-        child: Container(
-          decoration: liquidDecoration(
-            tint: Colors.white.withValues(alpha: 0.28),
-            radius: 30,
-          ),
-          padding: const EdgeInsets.fromLTRB(18, 12, 12, 12),
-          child: Row(
+  Future<void> _pickReminder() async {
+    final now = DateTime.now();
+    var selected = _reminderAt ?? now.add(const Duration(hours: 1));
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (context) => Container(
+        height: 320,
+        color: CupertinoColors.systemBackground.resolveFrom(context),
+        child: SafeArea(
+          top: false,
+          child: Column(
             children: [
-              Text(
-                '$count 条备忘录',
-                style: const TextStyle(
-                  color: Color(0xFF191916),
-                  fontWeight: FontWeight.w700,
+              SizedBox(
+                height: 52,
+                child: Row(
+                  children: [
+                    CupertinoButton(
+                      child: const Text('清除'),
+                      onPressed: () {
+                        setState(() => _reminderAt = null);
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                    const Spacer(),
+                    CupertinoButton(
+                      child: const Text('完成'),
+                      onPressed: () {
+                        setState(() => _reminderAt = selected);
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                  ],
                 ),
               ),
-              const Spacer(),
-              CupertinoButton(
-                padding: const EdgeInsets.all(12),
-                color: const Color(0xFF191916),
-                borderRadius: BorderRadius.circular(22),
-                onPressed: onCreate,
-                child: const Icon(
-                  CupertinoIcons.square_pencil,
-                  color: Colors.white,
-                  size: 22,
+              Expanded(
+                child: CupertinoDatePicker(
+                  mode: CupertinoDatePickerMode.dateAndTime,
+                  initialDateTime: selected,
+                  minimumDate: now,
+                  onDateTimeChanged: (value) => selected = value,
                 ),
               ),
             ],
@@ -630,38 +804,147 @@ class LiquidToolbar extends StatelessWidget {
       ),
     );
   }
-}
-
-class LiquidSearchField extends StatelessWidget {
-  const LiquidSearchField({
-    required this.controller,
-    required this.onChanged,
-    super.key,
-  });
-
-  final TextEditingController controller;
-  final ValueChanged<String> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(22),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-        child: Container(
-          decoration: liquidDecoration(
-            tint: Colors.white.withValues(alpha: 0.32),
-            radius: 22,
-          ),
-          child: CupertinoSearchTextField(
-            controller: controller,
-            onChanged: onChanged,
-            placeholder: '搜索标题或内容',
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
-            backgroundColor: Colors.transparent,
-            borderRadius: BorderRadius.circular(22),
-          ),
+    return CupertinoPageScaffold(
+      backgroundColor: CupertinoColors.systemGroupedBackground,
+      navigationBar: CupertinoNavigationBar(
+        middle: Text(widget.note == null ? '新建备忘录' : '编辑备忘录'),
+        trailing: CupertinoButton(
+          padding: EdgeInsets.zero,
+          onPressed: _save,
+          child: const Text('完成'),
         ),
+      ),
+      child: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 28),
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: ColoredBox(
+                color: CupertinoColors.secondarySystemGroupedBackground,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+                  child: Column(
+                    children: [
+                      CupertinoTextField.borderless(
+                        controller: _titleController,
+                        onChanged: (_) => setState(() {}),
+                        placeholder: '标题',
+                        textInputAction: TextInputAction.next,
+                        style: const TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.w700,
+                          color: CupertinoColors.label,
+                        ),
+                      ),
+                      const Separator(),
+                      CupertinoTextField.borderless(
+                        controller: _bodyController,
+                        onChanged: (_) => setState(() {}),
+                        placeholder: '备忘录',
+                        minLines: 12,
+                        maxLines: null,
+                        keyboardType: TextInputType.multiline,
+                        style: const TextStyle(
+                          fontSize: 17,
+                          height: 1.42,
+                          color: CupertinoColors.label,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            CupertinoListSection.insetGrouped(
+              margin: EdgeInsets.zero,
+              children: [
+                CupertinoListTile(
+                  leading: const Icon(CupertinoIcons.pin),
+                  title: const Text('置顶'),
+                  trailing: CupertinoSwitch(
+                    value: _isPinned,
+                    onChanged: (value) => setState(() => _isPinned = value),
+                  ),
+                ),
+                CupertinoListTile(
+                  leading: const Icon(CupertinoIcons.star),
+                  title: const Text('收藏'),
+                  trailing: CupertinoSwitch(
+                    value: _isFavorite,
+                    onChanged: (value) => setState(() => _isFavorite = value),
+                  ),
+                ),
+                CupertinoListTile(
+                  leading: const Icon(CupertinoIcons.bell),
+                  title: const Text('提醒时间'),
+                  subtitle: Text(
+                    _reminderAt == null ? '未设置' : formatDate(_reminderAt!),
+                  ),
+                  trailing: const CupertinoListTileChevron(),
+                  onTap: _pickReminder,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class NoteActionSheet extends StatelessWidget {
+  const NoteActionSheet({
+    required this.note,
+    required this.onCalendar,
+    required this.onReminder,
+    required this.onNotification,
+    required this.onLiveActivity,
+    required this.onEndLiveActivity,
+    super.key,
+  });
+
+  final Note note;
+  final VoidCallback onCalendar;
+  final VoidCallback onReminder;
+  final VoidCallback onNotification;
+  final VoidCallback onLiveActivity;
+  final VoidCallback onEndLiveActivity;
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoActionSheet(
+      title: Text(note.title),
+      message: const Text('使用 iOS 系统服务处理这条备忘录'),
+      actions: [
+        CupertinoActionSheetAction(
+          onPressed: onCalendar,
+          child: const Text('加入苹果日历'),
+        ),
+        CupertinoActionSheetAction(
+          onPressed: onReminder,
+          child: const Text('加入提醒事项'),
+        ),
+        CupertinoActionSheetAction(
+          onPressed: onNotification,
+          child: const Text('发送消息通知'),
+        ),
+        CupertinoActionSheetAction(
+          onPressed: onLiveActivity,
+          child: const Text('开始实时活动'),
+        ),
+        CupertinoActionSheetAction(
+          onPressed: onEndLiveActivity,
+          child: const Text('结束实时活动'),
+        ),
+      ],
+      cancelButton: CupertinoActionSheetAction(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('取消'),
       ),
     );
   }
@@ -674,194 +957,54 @@ class EmptyNotesView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: CupertinoButton(
-        onPressed: onCreate,
-        child: const Text('新建第一条备忘录'),
-      ),
-    );
-  }
-}
-
-class ColorPicker extends StatelessWidget {
-  const ColorPicker({
-    required this.selected,
-    required this.onChanged,
-    super.key,
-  });
-
-  static const colors = [
-    0xFFFFD166,
-    0xFF8EECF5,
-    0xFFA3E635,
-    0xFFFF8FAB,
-    0xFFCDB4DB,
-  ];
-
-  final int selected;
-  final ValueChanged<int> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: colors.map((color) {
-        final isSelected = color == selected;
-        return Padding(
-          padding: const EdgeInsets.only(right: 10),
-          child: GestureDetector(
-            onTap: () => onChanged(color),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(
-                color: Color(color),
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: isSelected ? const Color(0xFF191916) : Colors.white,
-                  width: isSelected ? 3 : 1.5,
-                ),
-              ),
-            ),
+    return Padding(
+      padding: const EdgeInsets.only(top: 96),
+      child: Column(
+        children: [
+          const Icon(
+            CupertinoIcons.doc_text_search,
+            size: 44,
+            color: CupertinoColors.systemGrey2,
           ),
-        );
-      }).toList(),
-    );
-  }
-}
-
-class GlassIconButton extends StatelessWidget {
-  const GlassIconButton({
-    required this.icon,
-    required this.onPressed,
-    super.key,
-  });
-
-  final IconData icon;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipOval(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-        child: CupertinoButton(
-          padding: EdgeInsets.zero,
-          onPressed: onPressed,
-          child: Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.34),
-              shape: BoxShape.circle,
-              border: Border.all(color: Colors.white.withValues(alpha: 0.62)),
-            ),
-            child: Icon(icon, color: const Color(0xFF191916), size: 21),
+          const SizedBox(height: 14),
+          const Text(
+            '没有备忘录',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
           ),
-        ),
+          const SizedBox(height: 6),
+          const Text(
+            '新建一条，把下一件事写下来。',
+            style: TextStyle(color: CupertinoColors.secondaryLabel),
+          ),
+          const SizedBox(height: 18),
+          CupertinoButton.filled(
+            onPressed: onCreate,
+            child: const Text('新建备忘录'),
+          ),
+        ],
       ),
     );
   }
 }
 
-class MiniAction extends StatelessWidget {
-  const MiniAction({required this.icon, required this.onPressed, super.key});
-
-  final IconData icon;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return CupertinoButton(
-      padding: EdgeInsets.zero,
-      minimumSize: const Size(32, 32),
-      onPressed: onPressed,
-      child: Container(
-        width: 34,
-        height: 34,
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.38),
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.white.withValues(alpha: 0.56)),
-        ),
-        child: Icon(icon, color: const Color(0xFF191916), size: 17),
-      ),
-    );
-  }
-}
-
-class LiquidBackground extends StatelessWidget {
-  const LiquidBackground({super.key});
+class Separator extends StatelessWidget {
+  const Separator({super.key});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFFF9F3DC),
-            Color(0xFFE7F7F7),
-            Color(0xFFF8EDF1),
-            Color(0xFFF5F4EF),
-          ],
-        ),
-      ),
-      child: CustomPaint(
-        painter: _LiquidBackgroundPainter(),
-        child: const SizedBox.expand(),
-      ),
+      height: 0.5,
+      color: CupertinoColors.separator.resolveFrom(context),
     );
   }
 }
 
-class _LiquidBackgroundPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()..style = PaintingStyle.fill;
-    paint.color = const Color(0xFFFFD166).withValues(alpha: 0.28);
-    canvas.drawCircle(
-      Offset(size.width * 0.18, size.height * 0.16),
-      120,
-      paint,
-    );
-    paint.color = const Color(0xFF8EECF5).withValues(alpha: 0.30);
-    canvas.drawCircle(
-      Offset(size.width * 0.86, size.height * 0.28),
-      150,
-      paint,
-    );
-    paint.color = const Color(0xFFFF8FAB).withValues(alpha: 0.22);
-    canvas.drawCircle(
-      Offset(size.width * 0.72, size.height * 0.82),
-      180,
-      paint,
-    );
+String previewText(Note note) {
+  final body = note.body.trim();
+  if (body.isEmpty) {
+    return '空白备忘录';
   }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-BoxDecoration liquidDecoration({required Color tint, required double radius}) {
-  return BoxDecoration(
-    color: tint,
-    borderRadius: BorderRadius.circular(radius),
-    border: Border.all(color: Colors.white.withValues(alpha: 0.58), width: 1.2),
-    boxShadow: [
-      BoxShadow(
-        color: const Color(0xFF4B4B4B).withValues(alpha: 0.10),
-        blurRadius: 28,
-        offset: const Offset(0, 18),
-      ),
-      BoxShadow(
-        color: Colors.white.withValues(alpha: 0.58),
-        blurRadius: 6,
-        offset: const Offset(-2, -2),
-      ),
-    ],
-  );
+  return body.replaceAll(RegExp(r'\s+'), ' ');
 }
 
 String formatDate(DateTime value) {

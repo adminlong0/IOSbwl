@@ -26,6 +26,16 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>用于把备忘录安排到苹果日历。</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>用于把备忘录安排到苹果日历。</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>用于把备忘录加入提醒事项。</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>用于把备忘录加入提醒事项。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
