@@ -1,35 +1,40 @@
 # NLBUS
 
-NLBUS is a native iOS real-time bus app for Putian (`pt111601`), rebuilt from the MyGoLBS H5 transit system as a SwiftUI app instead of an embedded webpage.
+NLBUS is a native iOS real-time bus app for Putian (`pt111601`). It rebuilds the MyGoLBS H5 transit experience as a SwiftUI app with Apple system controls instead of embedding the website.
 
-## Features
+## Current Experience
 
-- Search bus lines and stations
-- Browse all lines
-- Show nearby stations with iOS location permission
-- Show station-related lines
-- Show line stops and live vehicle data
-- Search transfer plans
-- Removes news/announcement pages and advertising/download content
+- Home tab: nearby stations within 500 meters, live vehicle preview, fuzzy line/station search, search history
+- Routes tab: all routes plus favorite routes pinned at the top
+- Line details: favorite action, two-way direction switch, operation time, timetable hint, fare, next departure, route info, arrival analysis, mileage, remarks, stop list, live map
+- Station details: passing routes, station vehicles, nearby stations
+- Map tab: route/station/vehicle filtering with native MapKit annotations
+- Settings tab: theme mode, accent color, local backup export/import, app info, developer `@奶龙`
+- Global quick action button: Apple Wallet, Putian citizen card mini-program, arrival notification setup
 
-## Native iOS Design
+Removed from the H5 reference intentionally:
 
-The app uses Apple system components:
+- News/announcement pages
+- Advertising and app-download promotion content
+- Separate transfer and query bottom tabs
 
-- `TabView`
-- `NavigationView`
-- `List`
-- `Section`
-- `TextField`
-- `Button`
-- `Label`
-- `Alert`
-- SF Symbols
-- CoreLocation permission flow
+## Putian Citizen Card Link
+
+The short link:
+
+```text
+https://wxmpurl.cn/vHnajJlAguq
+```
+
+returns an HTML bridge page for the WeChat mini-program `莆田市民卡`. The useful deep link exposed by that page is:
+
+```text
+weixin://dl/business/?t=vHnajJlAguq
+```
 
 ## API
 
-The app calls the same core API used by:
+Reference page:
 
 ```text
 https://h5.mygolbs.com/?areacode=pt111601
@@ -50,7 +55,6 @@ Core commands used:
 - `CMD=115` station lines
 - `CMD=103` line details
 - `CMD=104` live vehicle data
-- `CMD=111` transfer search
 
 ## Build IPA With GitHub Actions
 

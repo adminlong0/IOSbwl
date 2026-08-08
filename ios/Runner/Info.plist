@@ -25,7 +25,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>NLBUS 使用你的位置查找附近公交站。</string>
+	<string>NLBUS uses your location to find nearby bus stops and live vehicles.</string>
+	<key>NSUserNotificationsUsageDescription</key>
+	<string>NLBUS uses notifications to remind you when selected buses are approaching.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
