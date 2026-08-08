@@ -23,20 +23,16 @@ struct NoteActivityAttributes: ActivityAttributes {
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    GeneratedPluginRegistrant.register(with: self)
-    registerAppleServicesChannel()
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    registerAppleServicesChannel(registry: engineBridge.pluginRegistry)
   }
 
-  private func registerAppleServicesChannel() {
-    guard let registrar = registrar(forPlugin: "AppleServicesPlugin") else {
-      return
-    }
-
+  private func registerAppleServicesChannel(registry: FlutterPluginRegistry) {
+    let registrar = registry.registrar(forPlugin: "AppleServicesPlugin")
     let channel = FlutterMethodChannel(
       name: "liquid_notes/apple_services",
       binaryMessenger: registrar.messenger()
@@ -71,12 +67,12 @@ struct NoteActivityAttributes: ActivityAttributes {
         return
       }
       guard granted else {
-        result(self.flutterError("calendar_denied", "未获得日历访问权限"))
+        result(self.flutterError("calendar_denied", "Calendar access was not granted."))
         return
       }
 
       let event = EKEvent(eventStore: self.eventStore)
-      event.title = self.string(arguments["title"], fallback: "备忘录")
+      event.title = self.string(arguments["title"], fallback: "Note")
       event.notes = self.string(arguments["body"], fallback: "")
       event.startDate = self.date(arguments["start"]) ?? Date().addingTimeInterval(3600)
       event.endDate = self.date(arguments["end"]) ?? event.startDate.addingTimeInterval(1800)
@@ -84,7 +80,7 @@ struct NoteActivityAttributes: ActivityAttributes {
 
       do {
         try self.eventStore.save(event, span: .thisEvent)
-        result("已加入苹果日历")
+        result("Added to Calendar.")
       } catch {
         result(self.flutterError("calendar_save_failed", error.localizedDescription))
       }
@@ -99,12 +95,12 @@ struct NoteActivityAttributes: ActivityAttributes {
         return
       }
       guard granted else {
-        result(self.flutterError("reminder_denied", "未获得提醒事项访问权限"))
+        result(self.flutterError("reminder_denied", "Reminders access was not granted."))
         return
       }
 
       let reminder = EKReminder(eventStore: self.eventStore)
-      reminder.title = self.string(arguments["title"], fallback: "备忘录")
+      reminder.title = self.string(arguments["title"], fallback: "Note")
       reminder.notes = self.string(arguments["body"], fallback: "")
       reminder.calendar = self.eventStore.defaultCalendarForNewReminders()
       if let dueDate = self.date(arguments["due"]) {
@@ -116,7 +112,7 @@ struct NoteActivityAttributes: ActivityAttributes {
 
       do {
         try self.eventStore.save(reminder, commit: true)
-        result("已加入提醒事项")
+        result("Added to Reminders.")
       } catch {
         result(self.flutterError("reminder_save_failed", error.localizedDescription))
       }
@@ -132,13 +128,13 @@ struct NoteActivityAttributes: ActivityAttributes {
         return
       }
       guard granted else {
-        result(self.flutterError("notification_denied", "未获得通知权限"))
+        result(self.flutterError("notification_denied", "Notification access was not granted."))
         return
       }
 
       let content = UNMutableNotificationContent()
-      content.title = self.string(arguments["title"], fallback: "备忘录")
-      content.body = self.string(arguments["body"], fallback: "该查看这条备忘录了")
+      content.title = self.string(arguments["title"], fallback: "Note")
+      content.body = self.string(arguments["body"], fallback: "Open this note.")
       content.sound = .default
 
       let fireAt = self.date(arguments["fireAt"]) ?? Date().addingTimeInterval(300)
@@ -151,7 +147,7 @@ struct NoteActivityAttributes: ActivityAttributes {
         if let error {
           result(self.flutterError("notification_schedule_failed", error.localizedDescription))
         } else {
-          result("通知已安排")
+          result("Notification scheduled.")
         }
       }
     }
@@ -160,15 +156,15 @@ struct NoteActivityAttributes: ActivityAttributes {
   private func startLiveActivity(arguments: [String: Any], result: @escaping FlutterResult) {
     if #available(iOS 16.1, *) {
       guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-        result(flutterError("live_activity_disabled", "系统未开启实时活动"))
+        result(flutterError("live_activity_disabled", "Live Activities are disabled."))
         return
       }
 
       let attributes = NoteActivityAttributes(
-        title: string(arguments["title"], fallback: "备忘录"),
+        title: string(arguments["title"], fallback: "Note"),
         body: string(arguments["body"], fallback: "")
       )
-      let state = NoteActivityAttributes.ContentState(status: "正在跟进")
+      let state = NoteActivityAttributes.ContentState(status: "In progress")
 
       do {
         let activity = try Activity.request(
@@ -177,12 +173,12 @@ struct NoteActivityAttributes: ActivityAttributes {
           pushType: nil
         )
         liveActivity = activity
-        result("实时活动已启动")
+        result("Live Activity started.")
       } catch {
         result(flutterError("live_activity_failed", error.localizedDescription))
       }
     } else {
-      result(flutterError("live_activity_unavailable", "实时活动需要 iOS 16.1 或更高版本"))
+      result(flutterError("live_activity_unavailable", "Live Activities require iOS 16.1 or later."))
     }
   }
 
@@ -191,17 +187,17 @@ struct NoteActivityAttributes: ActivityAttributes {
       Task {
         for activity in Activity<NoteActivityAttributes>.activities {
           await activity.end(
-            using: NoteActivityAttributes.ContentState(status: "已完成"),
+            using: NoteActivityAttributes.ContentState(status: "Complete"),
             dismissalPolicy: .immediate
           )
         }
         DispatchQueue.main.async {
           self.liveActivity = nil
-          result("实时活动已结束")
+          result("Live Activity ended.")
         }
       }
     } else {
-      result(flutterError("live_activity_unavailable", "实时活动需要 iOS 16.1 或更高版本"))
+      result(flutterError("live_activity_unavailable", "Live Activities require iOS 16.1 or later."))
     }
   }
 
@@ -224,7 +220,10 @@ struct NoteActivityAttributes: ActivityAttributes {
   }
 
   private func string(_ value: Any?, fallback: String) -> String {
-    guard let value = value as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    guard
+      let value = value as? String,
+      !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else {
       return fallback
     }
     return value
