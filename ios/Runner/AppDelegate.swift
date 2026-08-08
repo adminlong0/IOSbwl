@@ -32,13 +32,15 @@ struct NoteActivityAttributes: ActivityAttributes {
   }
 
   private func registerAppleServicesChannel(registry: FlutterPluginRegistry) {
-    let registrar = registry.registrar(forPlugin: "AppleServicesPlugin")
+    guard let registrar = registry.registrar(forPlugin: "AppleServicesPlugin") else {
+      return
+    }
     let channel = FlutterMethodChannel(
       name: "liquid_notes/apple_services",
       binaryMessenger: registrar.messenger()
     )
 
-    channel.setMethodCallHandler { [weak self] call, result in
+    channel.setMethodCallHandler { [weak self] (call: FlutterMethodCall, result: @escaping FlutterResult) in
       guard let self else { return }
       let arguments = call.arguments as? [String: Any] ?? [:]
 
