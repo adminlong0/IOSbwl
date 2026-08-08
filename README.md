@@ -1,48 +1,69 @@
-# Liquid Notes
+# NLBUS
 
-Liquid Notes is a Flutter iOS notes app with a Cupertino interface and a liquid-glass inspired visual style.
+NLBUS is a native iOS real-time bus app for Putian (`pt111601`), rebuilt from the MyGoLBS H5 transit system as a SwiftUI app instead of an embedded webpage.
 
 ## Features
 
-- Create and edit notes
-- Search by title or body
-- Pin, favorite, and swipe-delete notes
-- Local persistence with `shared_preferences`
-- Translucent glass panels, blur, soft highlights, and floating controls
+- Search bus lines and stations
+- Browse all lines
+- Show nearby stations with iOS location permission
+- Show station-related lines
+- Show line stops and live vehicle data
+- Search transfer plans
+- Removes news/announcement pages and advertising/download content
 
-## Local Checks
+## Native iOS Design
 
-```bash
-flutter pub get
-flutter analyze
-flutter test
+The app uses Apple system components:
+
+- `TabView`
+- `NavigationView`
+- `List`
+- `Section`
+- `TextField`
+- `Button`
+- `Label`
+- `Alert`
+- SF Symbols
+- CoreLocation permission flow
+
+## API
+
+The app calls the same core API used by:
+
+```text
+https://h5.mygolbs.com/?areacode=pt111601
 ```
+
+Endpoint:
+
+```text
+https://h5.mygolbs.com/ApiData.do
+```
+
+Core commands used:
+
+- `CMD=205` city config
+- `CMD=102` line/station search
+- `CMD=119` all lines
+- `CMD=106` nearby stations
+- `CMD=115` station lines
+- `CMD=103` line details
+- `CMD=104` live vehicle data
+- `CMD=111` transfer search
 
 ## Build IPA With GitHub Actions
 
-This repository includes `.github/workflows/ios-ipa.yml`.
-
-1. Push this project to GitHub.
-2. Open the repository on GitHub.
-3. Go to `Actions`.
-4. Select `Build iOS IPA`.
-5. Click `Run workflow`.
-6. After it finishes, download the `liquid-notes-unsigned-ipa` artifact.
-
-The workflow builds on GitHub's macOS runner with:
-
-```bash
-flutter build ios --release --no-codesign
-```
-
-Then it packages `Runner.app` into:
+Open the repository on GitHub, go to `Actions`, run `Build iOS IPA`, then download:
 
 ```text
-LiquidNotes-unsigned.ipa
+nlbus-unsigned-ipa
 ```
 
-## Signing Note
+The generated file is:
 
-The generated IPA is unsigned. It is useful as a build artifact, but it will not install on a real iPhone unless it is signed with an Apple Developer certificate and provisioning profile.
+```text
+NLBUS-unsigned.ipa
+```
 
-For a directly installable IPA, configure Apple signing on macOS or extend the workflow with Apple certificate and provisioning profile secrets.
+Unsigned IPA files require manual signing before normal iPhone installation.

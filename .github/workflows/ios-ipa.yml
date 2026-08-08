@@ -17,36 +17,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.44.0"
-          channel: stable
-          cache: true
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
 
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Analyze
-        run: flutter analyze
-
-      - name: Test
-        run: flutter test
-
-      - name: Build iOS app without code signing
-        run: flutter build ios --release --no-codesign
+      - name: Build native iOS app without signing
+        run: |
+          xcodebuild \
+            -project ios/Runner.xcodeproj \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
 
       - name: Package unsigned IPA
         run: |
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/NLBUS.app"
+          test -d "$APP_PATH"
           mkdir -p build/ios/ipa/Payload
-          cp -R build/ios/iphoneos/Runner.app build/ios/ipa/Payload/Runner.app
+          cp -R "$APP_PATH" build/ios/ipa/Payload/NLBUS.app
           cd build/ios/ipa
-          zip -qry LiquidNotes-unsigned.ipa Payload
+          zip -qry NLBUS-unsigned.ipa Payload
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: liquid-notes-unsigned-ipa
-          path: build/ios/ipa/LiquidNotes-unsigned.ipa
+          name: nlbus-unsigned-ipa
+          path: build/ios/ipa/NLBUS-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
