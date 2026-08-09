@@ -1356,7 +1356,7 @@ extension View {
   @ViewBuilder
   func nlbusGlass() -> some View {
     if #available(iOS 26.0, *) {
-      self.glassEffect(.regular.interactive())
+      self.glassEffect(.regular.interactive(), in: Capsule())
     } else {
       self.background(.regularMaterial)
     }
