@@ -34,9 +34,12 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee build/xcodebuild.log || BUILD_STATUS=$?
           if [ "${BUILD_STATUS:-0}" -ne 0 ]; then
-            tail -n 100 build/xcodebuild.log | base64 | tr -d '\n' | fold -w 3000 | while IFS= read -r chunk; do
-              echo "::error title=Xcode diagnostic base64::$chunk"
-            done
+            {
+              echo '### Xcode diagnostic'
+              echo '```text'
+              tail -n 180 build/xcodebuild.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             exit "$BUILD_STATUS"
           fi
 
