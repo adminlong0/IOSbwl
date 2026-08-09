@@ -38,9 +38,10 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
   @Published var mapFilter = ""
   @Published var message: String?
   @Published var isLoading = false
+  @Published var selectedCityKey = "pt111601"
 
   private let api = BusAPI()
-  private let cityKey = "pt111601"
+  private var cityKey: String { selectedCityKey }
   private let locationManager = CLLocationManager()
   private var didBootstrap = false
 
@@ -82,6 +83,13 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
     } catch {
       message = error.localizedDescription
     }
+  }
+
+  func reloadCity() async {
+    didBootstrap = true
+    await loadCity()
+    await loadAllLines()
+    await loadNearbyStations()
   }
 
   func search() async {
@@ -127,7 +135,11 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
         "CITYKEY": cityKey,
         "KEY": "",
       ])
-      allLines = payload.array("buslines").map(BusLine.init(dictionary:))
+      allLines = payload.arrayAny(["buslines", "data", "list", "rows", "result"])
+        .map(BusLine.init(dictionary:))
+        .reduce(into: [BusLine]()) { result, line in
+          if !result.contains(where: { $0.id == line.id }) { result.append(line) }
+        }
     } catch {
       message = error.localizedDescription
     }
@@ -192,6 +204,11 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
       "STATIONORDER": "\(stationOrder)",
     ])
     return RealtimeSnapshot(dictionary: payload)
+  }
+
+  func loadStops(for lineName: String, direction: String) async throws -> [RouteStop] {
+    let payload = try await api.request(["CMD": "103", "CITYNAME": cityName, "CITYKEY": cityKey, "LINENAME": lineName, "DIRECTION": direction])
+    return payload.arrayAny(["data", "list", "stations", "busstations"]).enumerated().map { RouteStop(index: $0.offset, dictionary: $0.element) }
   }
 
   func toggleFavorite(_ line: BusLine) {
@@ -421,13 +438,13 @@ struct LiveBus: Identifiable, Hashable, MapPointRepresentable {
   let arriveText: String
 
   init(index: Int, dictionary: [String: Any]) {
-    busName = dictionary.string("busName", fallback: dictionary.string("name", fallback: dictionary.string("busNo", fallback: "车辆 \(index + 1)")))
-    stationOrder = dictionary.int("stationOrder", fallback: dictionary.int("order", fallback: 0))
-    distance = dictionary.string("dis", fallback: dictionary.string("distance", fallback: ""))
+    busName = dictionary.stringAny(["busName", "busno", "busNo", "vehicleNo", "carNo", "name"], fallback: "车辆 \(index + 1)")
+    stationOrder = dictionary.intAny(["stationOrder", "stationIndex", "stationNum", "order", "seq"], fallback: 0)
+    distance = dictionary.stringAny(["dis", "distance", "distanceToStation", "remainDistance"], fallback: "")
     speed = dictionary.string("speed", fallback: "")
-    latitude = dictionary.string("lat", fallback: dictionary.string("latitude", fallback: ""))
-    longitude = dictionary.string("lon", fallback: dictionary.string("lng", fallback: dictionary.string("longitude", fallback: "")))
-    arriveText = dictionary.string("arrivalTime", fallback: dictionary.string("time", fallback: ""))
+    latitude = dictionary.stringAny(["lat", "latitude", "gpsLat", "y"], fallback: "")
+    longitude = dictionary.stringAny(["lon", "lng", "longitude", "gpsLng", "x"], fallback: "")
+    arriveText = dictionary.stringAny(["arrivalTime", "arriveTime", "eta", "time", "remainTime"], fallback: "")
   }
 }
 
@@ -436,8 +453,10 @@ struct RealtimeSnapshot {
   let buses: [LiveBus]
 
   init(dictionary: [String: Any]) {
-    planTime = dictionary.string("planTime", fallback: dictionary.string("nextTime", fallback: ""))
-    buses = dictionary.array("list").enumerated().map { LiveBus(index: $0.offset, dictionary: $0.element) }
+    let source = (dictionary["data"] as? [String: Any]) ?? dictionary
+    planTime = source.stringAny(["planTime", "nextTime", "firstArriveTime", "arrivalTime"], fallback: "")
+    buses = source.arrayAny(["list", "buslist", "vehicleList", "vehicles", "rows", "data"])
+      .enumerated().map { LiveBus(index: $0.offset, dictionary: $0.element) }
   }
 }
 
@@ -591,7 +610,7 @@ struct NLBUSAppView: View {
         Image(systemName: "plus")
           .font(.title3.weight(.semibold))
           .frame(width: 54, height: 54)
-          .background(.regularMaterial)
+          .nlbusGlass()
           .clipShape(Circle())
           .shadow(color: .black.opacity(0.18), radius: 12, y: 6)
       }
@@ -813,12 +832,12 @@ struct LineDetailView: View {
       }
 
       Section("运营信息") {
-        InfoRow(title: "首末班", value: operationTime)
-        InfoRow(title: "收费信息", value: currentLine.fare.isEmpty ? "以车载与站牌公示为准" : currentLine.fare)
-        InfoRow(title: "预计最近发车", value: planTime.isEmpty ? "暂无实时发车数据" : planTime)
-        InfoRow(title: "线路里程", value: currentLine.mileage.isEmpty ? "暂无里程数据" : currentLine.mileage)
-        InfoRow(title: "线路概括", value: currentLine.summary.isEmpty ? "暂无概括" : currentLine.summary)
-        InfoRow(title: "备注", value: currentLine.remark.isEmpty ? "暂无备注" : currentLine.remark)
+        if !operationTime.isEmpty { InfoRow(title: "首末班", value: operationTime) }
+        if !currentLine.fare.isEmpty { InfoRow(title: "收费信息", value: currentLine.fare) }
+        if !planTime.isEmpty { InfoRow(title: "预计最近发车", value: planTime) }
+        if !currentLine.mileage.isEmpty { InfoRow(title: "线路里程", value: currentLine.mileage) }
+        if !currentLine.summary.isEmpty { InfoRow(title: "线路概括", value: currentLine.summary) }
+        if !currentLine.remark.isEmpty { InfoRow(title: "备注", value: currentLine.remark) }
       }
 
       Section("到站分析") {
@@ -875,7 +894,7 @@ struct LineDetailView: View {
   }
 
   private var operationTime: String {
-    if currentLine.beginTime.isEmpty && currentLine.endTime.isEmpty { return "暂无首末班数据" }
+    if currentLine.beginTime.isEmpty && currentLine.endTime.isEmpty { return "" }
     return "\(currentLine.beginTime) - \(currentLine.endTime)"
   }
 
@@ -1025,7 +1044,7 @@ struct TransitMapView: View {
           }
 
           Section("路线") {
-            ForEach(store.filteredLines.prefix(30)) { line in
+            ForEach(store.filteredLines) { line in
               Button {
                 selectedLine = line
                 Task { await load(line: line) }
@@ -1039,6 +1058,7 @@ struct TransitMapView: View {
 
         FullMapView(stops: stops, buses: buses, nearbyStations: store.nearbyStations)
       }
+      .task { await store.loadNearbyStations() }
       .navigationTitle("地图")
       .toolbar {
         Button {
@@ -1092,11 +1112,6 @@ struct SettingsView: View {
 
         Section("配置备份") {
           Button {
-            store.message = "iCloud 同步需要 Apple Developer 的 iCloud entitlement。当前已支持本地备份导出/导入，GitHub 构建无需证书即可生成未签名 IPA。"
-          } label: {
-            Label("上传至 iCloud", systemImage: "icloud.and.arrow.up")
-          }
-          Button {
             exporting = true
           } label: {
             Label("导出本地备份", systemImage: "square.and.arrow.up")
@@ -1110,7 +1125,12 @@ struct SettingsView: View {
 
         Section("软件信息") {
           SettingsInfoRow(title: "名称", value: "NLBUS")
-          SettingsInfoRow(title: "城市", value: store.cityDisplayName)
+          Picker("城市", selection: $store.selectedCityKey) {
+            Text("莆田市").tag("pt111601")
+          }
+          TextField("城市代码", text: $store.selectedCityKey)
+            .textInputAutocapitalization(.never)
+            .onSubmit { Task { await store.reloadCity() } }
           SettingsInfoRow(title: "开发者", value: "@奶龙")
           SettingsInfoRow(title: "数据来源", value: "mygolbs 实时公交接口")
         }
@@ -1173,11 +1193,15 @@ struct QuickActionSheet: View {
         Section("到站通知") {
           Picker("路线", selection: $selectedLine) {
             Text("选择路线").tag(Optional<BusLine>.none)
-            ForEach(store.allLines.prefix(80)) { line in
+            ForEach(store.allLines) { line in
               Text(line.name).tag(Optional(line))
             }
           }
-          TextField("绑定站点名称", text: $selectedStation)
+          if let selectedLine {
+            StationPicker(line: selectedLine, selection: $selectedStation)
+          } else {
+            Text("请先选择线路").foregroundColor(.secondary)
+          }
           Picker("提醒模式", selection: $notifyMode) {
             ForEach(NotifyMode.allCases) { mode in
               Text(mode.title).tag(mode)
@@ -1222,6 +1246,26 @@ struct QuickActionSheet: View {
     }
     store.message = "已创建本地提醒。实时轮询触发需要后台定位/推送证书，当前先以本地通知验证流程。"
     dismiss()
+  }
+}
+
+struct StationPicker: View {
+  @EnvironmentObject private var store: BusStore
+  let line: BusLine
+  @Binding var selection: String
+  @State private var stops: [RouteStop] = []
+
+  var body: some View {
+    Picker("绑定站点", selection: $selection) {
+      Text("选择站点").tag("")
+      ForEach(stops) { stop in
+        Text(stop.name).tag(stop.name)
+      }
+    }
+    .task(id: line.id) {
+      do { stops = try await store.loadStops(for: line) }
+      catch { store.message = error.localizedDescription }
+    }
   }
 }
 
@@ -1305,6 +1349,17 @@ struct FullMapView: View {
     guard let first = pins.first else { return }
     region.center = first.coordinate
     region.span = MKCoordinateSpan(latitudeDelta: 0.04, longitudeDelta: 0.04)
+  }
+}
+
+extension View {
+  @ViewBuilder
+  func nlbusGlass() -> some View {
+    if #available(iOS 26.0, *) {
+      self.glassEffect(.regular.interactive())
+    } else {
+      self.background(.regularMaterial)
+    }
   }
 }
 
@@ -1461,6 +1516,21 @@ extension BusLine {
 }
 
 extension Dictionary where Key == String, Value == Any {
+  func stringAny(_ keys: [String], fallback: String = "") -> String {
+    for key in keys { let value = string(key); if !value.isEmpty { return value } }
+    return fallback
+  }
+
+  func intAny(_ keys: [String], fallback: Int = 0) -> Int {
+    for key in keys { let value = int(key); if value != 0 { return value } }
+    return fallback
+  }
+
+  func arrayAny(_ keys: [String]) -> [[String: Any]] {
+    for key in keys { if let value = self[key] as? [[String: Any]], !value.isEmpty { return value } }
+    return []
+  }
+
   func string(_ key: String, fallback: String = "") -> String {
     if let value = self[key] as? String { return value }
     if let value = self[key] as? NSNumber { return value.stringValue }
