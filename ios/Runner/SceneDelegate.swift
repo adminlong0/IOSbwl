@@ -459,8 +459,8 @@ struct LiveBus: Identifiable, Hashable, MapPointRepresentable {
   let stationOrder: Int
   let distance: String
   let speed: String
-  let latitude: String
-  let longitude: String
+  var latitude: String
+  var longitude: String
   let arriveText: String
   let fittedPointIndex: Int
   let angle: Double
