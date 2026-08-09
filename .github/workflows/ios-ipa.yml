@@ -23,6 +23,7 @@ jobs:
       - name: Build native iOS app without signing
         run: |
           set -o pipefail
+          mkdir -p build
           xcodebuild \
             -project ios/Runner.xcodeproj \
             -scheme Runner \
