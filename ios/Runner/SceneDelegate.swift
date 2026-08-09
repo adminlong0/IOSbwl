@@ -184,26 +184,29 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
   }
 
   func loadStops(for line: BusLine) async throws -> [RouteStop] {
-    let payload = try await api.request([
-      "CMD": "103",
-      "CITYNAME": cityName,
-      "CITYKEY": cityKey,
-      "LINENAME": line.name,
-      "DIRECTION": line.direction,
-    ])
-    return payload.array("data").enumerated().map { RouteStop(index: $0.offset, dictionary: $0.element) }
+    var lastError: Error?
+    let directions = [line.direction, line.direction == "1" ? "0" : "1", "", "上行", "下行"]
+    for direction in directions {
+      do {
+        let payload = try await api.request(["CMD": "103", "CITYNAME": cityName, "CITYKEY": cityKey, "LINENAME": line.name, "DIRECTION": direction])
+        let rows = payload.arrayAny(["data", "list", "stations", "busstations", "stationList"])
+        if !rows.isEmpty { return rows.enumerated().map { RouteStop(index: $0.offset, dictionary: $0.element) } }
+      } catch { lastError = error }
+    }
+    throw lastError ?? BusError.invalidData
   }
 
   func loadRealtime(line: BusLine, stationOrder: Int) async throws -> RealtimeSnapshot {
-    let payload = try await api.request([
-      "CMD": "104",
-      "CITYNAME": cityName,
-      "CITYKEY": cityKey,
-      "LINENAME": line.name,
-      "DIRECTION": line.direction,
-      "STATIONORDER": "\(stationOrder)",
-    ])
-    return RealtimeSnapshot(dictionary: payload)
+    var lastError: Error?
+    let directions = [line.direction, line.direction == "1" ? "0" : "1", "", "上行", "下行"]
+    for direction in directions {
+      do {
+        let payload = try await api.request(["CMD": "104", "CITYNAME": cityName, "CITYKEY": cityKey, "LINENAME": line.name, "DIRECTION": direction, "STATIONORDER": "\(stationOrder)"])
+        let snapshot = RealtimeSnapshot(dictionary: payload)
+        if !snapshot.buses.isEmpty || !snapshot.planTime.isEmpty { return snapshot }
+      } catch { lastError = error }
+    }
+    throw lastError ?? BusError.message("当前线路暂无实时车辆")
   }
 
   func loadStops(for lineName: String, direction: String) async throws -> [RouteStop] {
@@ -438,13 +441,14 @@ struct LiveBus: Identifiable, Hashable, MapPointRepresentable {
   let arriveText: String
 
   init(index: Int, dictionary: [String: Any]) {
-    busName = dictionary.stringAny(["busName", "busno", "busNo", "vehicleNo", "carNo", "name"], fallback: "车辆 \(index + 1)")
-    stationOrder = dictionary.intAny(["stationOrder", "stationIndex", "stationNum", "order", "seq"], fallback: 0)
-    distance = dictionary.stringAny(["dis", "distance", "distanceToStation", "remainDistance"], fallback: "")
-    speed = dictionary.string("speed", fallback: "")
-    latitude = dictionary.stringAny(["lat", "latitude", "gpsLat", "y"], fallback: "")
-    longitude = dictionary.stringAny(["lon", "lng", "longitude", "gpsLng", "x"], fallback: "")
-    arriveText = dictionary.stringAny(["arrivalTime", "arriveTime", "eta", "time", "remainTime"], fallback: "")
+    let source = dictionary.mergedNestedObjects(keys: ["gps", "location", "position", "vehicle"])
+    busName = source.stringAny(["busName", "busno", "busNo", "vehicleNo", "carNo", "name", "id"], fallback: "车辆 \(index + 1)")
+    stationOrder = source.intAny(["stationOrder", "stationIndex", "stationNum", "order", "seq"], fallback: 0)
+    distance = source.stringAny(["dis", "distance", "distanceToStation", "remainDistance"], fallback: "")
+    speed = source.stringAny(["speed", "velocity"], fallback: "")
+    latitude = source.stringAny(["lat", "latitude", "gpsLat", "y"], fallback: "")
+    longitude = source.stringAny(["lon", "lng", "longitude", "gpsLng", "x"], fallback: "")
+    arriveText = source.stringAny(["arrivalTime", "arriveTime", "eta", "time", "remainTime"], fallback: "")
   }
 }
 
@@ -1225,7 +1229,11 @@ struct QuickActionSheet: View {
 
   private func open(_ raw: String) {
     guard let url = URL(string: raw) else { return }
-    UIApplication.shared.open(url)
+    if raw.hasPrefix("weixin://"), !UIApplication.shared.canOpenURL(url) {
+      UIApplication.shared.open(URL(string: "https://wxmpurl.cn/vHnajJlAguq")!)
+    } else {
+      UIApplication.shared.open(url)
+    }
     dismiss()
   }
 
@@ -1336,11 +1344,9 @@ struct FullMapView: View {
       guard let coordinate = bus.coordinate else { return nil }
       return MapPinItem(title: bus.busName, subtitle: bus.distance, coordinate: coordinate, systemImage: "bus.fill")
     }
-    if items.isEmpty {
-      items += nearbyStations.compactMap { station in
-        guard let coordinate = station.coordinate else { return nil }
-        return MapPinItem(title: station.name, subtitle: station.distance, coordinate: coordinate, systemImage: "mappin.circle")
-      }
+    items += nearbyStations.compactMap { station in
+      guard let coordinate = station.coordinate else { return nil }
+      return MapPinItem(title: station.name, subtitle: station.distance, coordinate: coordinate, systemImage: "mappin.circle")
     }
     return items
   }
@@ -1513,6 +1519,14 @@ extension BusLine {
 }
 
 extension Dictionary where Key == String, Value == Any {
+  func mergedNestedObjects(keys: [String]) -> [String: Any] {
+    var result = self
+    for key in keys {
+      if let nested = self[key] as? [String: Any] { result.merge(nested) { current, _ in current } }
+    }
+    return result
+  }
+
   func stringAny(_ keys: [String], fallback: String = "") -> String {
     for key in keys { let value = string(key); if !value.isEmpty { return value } }
     return fallback
