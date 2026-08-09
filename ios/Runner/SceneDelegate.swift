@@ -1,3 +1,4 @@
+import ActivityKit
 import CoreLocation
 import MapKit
 import SwiftUI
@@ -38,12 +39,14 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
   @Published var mapFilter = ""
   @Published var message: String?
   @Published var isLoading = false
+  @Published var userCoordinate: CLLocationCoordinate2D?
   @Published var selectedCityKey = "pt111601"
 
   private let api = BusAPI()
   private var cityKey: String { selectedCityKey }
   private let locationManager = CLLocationManager()
   private var didBootstrap = false
+  private var routeGeometry: [String: [CLLocationCoordinate2D]] = [:]
 
   override init() {
     super.init()
@@ -185,12 +188,18 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
 
   func loadStops(for line: BusLine) async throws -> [RouteStop] {
     var lastError: Error?
-    let directions = [line.direction, line.direction == "1" ? "0" : "1", "", "上行", "下行"]
+    let directions = [line.direction, line.direction == "1" ? "2" : "1"]
     for direction in directions {
       do {
         let payload = try await api.request(["CMD": "103", "CITYNAME": cityName, "CITYKEY": cityKey, "LINENAME": line.name, "DIRECTION": direction])
         let rows = payload.arrayAny(["data", "list", "stations", "busstations", "stationList"])
-        if !rows.isEmpty { return rows.enumerated().map { RouteStop(index: $0.offset, dictionary: $0.element) } }
+        if !rows.isEmpty {
+          routeGeometry[line.id] = payload.array("nihelist").compactMap { point in
+            guard let lat = Double(point.string("lat")), let lng = Double(point.string("lng")) else { return nil }
+            return CLLocationCoordinate2D(latitude: lat, longitude: lng)
+          }
+          return rows.enumerated().map { RouteStop(index: $0.offset, dictionary: $0.element) }
+        }
       } catch { lastError = error }
     }
     throw lastError ?? BusError.invalidData
@@ -198,11 +207,20 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
 
   func loadRealtime(line: BusLine, stationOrder: Int) async throws -> RealtimeSnapshot {
     var lastError: Error?
-    let directions = [line.direction, line.direction == "1" ? "0" : "1", "", "上行", "下行"]
+    let directions = [line.direction, line.direction == "1" ? "2" : "1"]
     for direction in directions {
       do {
         let payload = try await api.request(["CMD": "104", "CITYNAME": cityName, "CITYKEY": cityKey, "LINENAME": line.name, "DIRECTION": direction, "STATIONORDER": "\(stationOrder)"])
-        let snapshot = RealtimeSnapshot(dictionary: payload)
+        var snapshot = RealtimeSnapshot(dictionary: payload)
+        if let geometry = routeGeometry[line.id], !geometry.isEmpty {
+          for index in snapshot.buses.indices {
+            let pointIndex = min(max(snapshot.buses[index].fittedPointIndex, 0), geometry.count - 1)
+            if snapshot.buses[index].fittedPointIndex >= 0 {
+              snapshot.buses[index].latitude = String(geometry[pointIndex].latitude)
+              snapshot.buses[index].longitude = String(geometry[pointIndex].longitude)
+            }
+          }
+        }
         if !snapshot.buses.isEmpty || !snapshot.planTime.isEmpty { return snapshot }
       } catch { lastError = error }
     }
@@ -274,8 +292,12 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
       accent = value
     }
     if let data = UserDefaults.standard.data(forKey: "quickLinks"),
-       let value = try? decoder.decode([QuickLink].self, from: data),
+       var value = try? decoder.decode([QuickLink].self, from: data),
        !value.isEmpty {
+      for index in value.indices where value[index].title.contains("莆田") {
+        value[index].url = "weixin://"
+        value[index].subtitle = "打开微信并搜索莆田市民卡"
+      }
       quickLinks = value
     }
   }
@@ -295,6 +317,7 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
   nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     guard let location = locations.last else { return }
     Task { @MainActor in
+      userCoordinate = location.coordinate
       await loadNearbyStations(
         lng: "\(location.coordinate.longitude)",
         lat: "\(location.coordinate.latitude)"
@@ -385,8 +408,8 @@ struct BusLine: Identifiable, Hashable, Codable {
 struct BusStation: Identifiable, Hashable {
   var id: String { "\(name)-\(latitude)-\(longitude)" }
   let name: String
-  let latitude: String
-  let longitude: String
+  var latitude: String
+  var longitude: String
 
   init(dictionary: [String: Any]) {
     name = dictionary.string("stationName", fallback: dictionary.string("name", fallback: "未知站点"))
@@ -423,9 +446,9 @@ struct RouteStop: Identifiable, Hashable, MapPointRepresentable {
 
   init(index: Int, dictionary: [String: Any]) {
     order = dictionary.int("stationOrder", fallback: dictionary.int("order", fallback: index + 1))
-    name = dictionary.string("stationName", fallback: dictionary.string("name", fallback: "站点"))
-    latitude = dictionary.string("lat", fallback: dictionary.string("latitude", fallback: ""))
-    longitude = dictionary.string("lon", fallback: dictionary.string("lng", fallback: dictionary.string("longitude", fallback: "")))
+    name = dictionary.stringAny(["showName", "stationName", "name"], fallback: "站点")
+    latitude = dictionary.stringAny(["station_lat", "lat", "latitude"], fallback: "")
+    longitude = dictionary.stringAny(["station_lon", "lon", "lng", "longitude"], fallback: "")
   }
 }
 
@@ -439,22 +462,26 @@ struct LiveBus: Identifiable, Hashable, MapPointRepresentable {
   let latitude: String
   let longitude: String
   let arriveText: String
+  let fittedPointIndex: Int
+  let angle: Double
 
   init(index: Int, dictionary: [String: Any]) {
     let source = dictionary.mergedNestedObjects(keys: ["gps", "location", "position", "vehicle"])
-    busName = source.stringAny(["busName", "busno", "busNo", "vehicleNo", "carNo", "name", "id"], fallback: "车辆 \(index + 1)")
+    busName = source.stringAny(["busNumber", "busName", "busno", "busNo", "vehicleNo", "carNo", "name", "id"], fallback: "车辆 \(index + 1)")
     stationOrder = source.intAny(["stationOrder", "stationIndex", "stationNum", "order", "seq"], fallback: 0)
     distance = source.stringAny(["dis", "distance", "distanceToStation", "remainDistance"], fallback: "")
     speed = source.stringAny(["speed", "velocity"], fallback: "")
-    latitude = source.stringAny(["lat", "latitude", "gpsLat", "y"], fallback: "")
-    longitude = source.stringAny(["lon", "lng", "longitude", "gpsLng", "x"], fallback: "")
+    latitude = source.stringAny(["bus_lat", "lat", "latitude", "gpsLat", "y"], fallback: "")
+    longitude = source.stringAny(["bus_lng", "lon", "lng", "longitude", "gpsLng", "x"], fallback: "")
     arriveText = source.stringAny(["arrivalTime", "arriveTime", "eta", "time", "remainTime"], fallback: "")
+    fittedPointIndex = source.int("nihePointIndex", fallback: -1)
+    angle = Double(source.string("angle")) ?? 0
   }
 }
 
 struct RealtimeSnapshot {
   let planTime: String
-  let buses: [LiveBus]
+  var buses: [LiveBus]
 
   init(dictionary: [String: Any]) {
     let source = (dictionary["data"] as? [String: Any]) ?? dictionary
@@ -535,7 +562,7 @@ struct QuickLink: Identifiable, Codable, Hashable {
 
   static let defaults = [
     QuickLink(id: UUID(), title: "Apple 钱包", subtitle: "打开系统钱包", url: "shoebox://", systemImage: "wallet.pass"),
-    QuickLink(id: UUID(), title: "莆田市民卡", subtitle: "微信小程序：莆田市民卡", url: "weixin://dl/business/?t=vHnajJlAguq", systemImage: "creditcard"),
+    QuickLink(id: UUID(), title: "莆田市民卡", subtitle: "打开微信并搜索莆田市民卡", url: "weixin://", systemImage: "creditcard"),
   ]
 }
 
@@ -871,6 +898,9 @@ struct LineDetailView: View {
         MiniMapView(stops: stops, buses: buses)
           .frame(height: 220)
           .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        Link(destination: officialRealtimeURL) {
+          Label("使用官方网页核对实时车辆", systemImage: "safari")
+        }
       }
 
       Section("站点列表") {
@@ -902,6 +932,15 @@ struct LineDetailView: View {
     return "\(currentLine.beginTime) - \(currentLine.endTime)"
   }
 
+  private var officialRealtimeURL: URL {
+    var components = URLComponents(string: "https://h5.mygolbs.com/")!
+    components.queryItems = [
+      URLQueryItem(name: "areacode", value: "pt111601"),
+      URLQueryItem(name: "text", value: currentLine.name),
+    ]
+    return components.url!
+  }
+
   private var sortedBuses: [LiveBus] {
     switch sortMode {
     case .arrival:
@@ -914,7 +953,7 @@ struct LineDetailView: View {
   }
 
   private func switchDirection() {
-    let nextDirection = currentLine.direction == "1" ? "0" : "1"
+    let nextDirection = currentLine.direction == "1" ? "2" : "1"
     if let match = store.allLines.first(where: { $0.name == currentLine.name && $0.direction == nextDirection }) {
       currentLine = match
     } else {
@@ -1060,9 +1099,11 @@ struct TransitMapView: View {
         }
         .frame(maxHeight: 290)
 
-        FullMapView(stops: stops, buses: buses, nearbyStations: store.nearbyStations)
+        FullMapView(stops: stops, buses: buses, nearbyStations: store.nearbyStations, userCoordinate: store.userCoordinate)
       }
-      .task { await store.loadNearbyStations() }
+      .task {
+        if store.nearbyStations.isEmpty { store.requestNearbyStations() }
+      }
       .navigationTitle("地图")
       .toolbar {
         Button {
@@ -1217,6 +1258,12 @@ struct QuickActionSheet: View {
           } label: {
             Label("创建到站提醒", systemImage: "bell.badge")
           }
+          Button {
+            Task { await createLiveActivity() }
+          } label: {
+            Label("创建实时活动", systemImage: "rectangle.inset.filled.and.person.filled")
+          }
+          .disabled(selectedLine == nil || selectedStation.isEmpty)
         }
       }
       .navigationTitle("快捷操作")
@@ -1229,6 +1276,13 @@ struct QuickActionSheet: View {
 
   private func open(_ raw: String) {
     guard let url = URL(string: raw) else { return }
+    if raw == "weixin://" {
+      UIPasteboard.general.string = "莆田市民卡"
+      UIApplication.shared.open(url)
+      store.message = "已复制“莆田市民卡”，请在微信顶部搜索框粘贴搜索。"
+      dismiss()
+      return
+    }
     if raw.hasPrefix("weixin://"), !UIApplication.shared.canOpenURL(url) {
       UIApplication.shared.open(URL(string: "https://wxmpurl.cn/vHnajJlAguq")!)
     } else {
@@ -1254,6 +1308,62 @@ struct QuickActionSheet: View {
     }
     store.message = "已创建本地提醒。实时轮询触发需要后台定位/推送证书，当前先以本地通知验证流程。"
     dismiss()
+  }
+
+  @MainActor
+  private func createLiveActivity() async {
+    guard #available(iOS 16.1, *), ActivityAuthorizationInfo().areActivitiesEnabled else {
+      store.message = "请在系统设置中允许 NLBUS 使用实时活动。"
+      return
+    }
+    guard let line = selectedLine else { return }
+    do {
+      let stops = try await store.loadStops(for: line)
+      let target = stops.first(where: { $0.name == selectedStation }) ?? stops.first
+      let snapshot = try await store.loadRealtime(line: line, stationOrder: target?.order ?? 1)
+      let bus = snapshot.buses.min { lhs, rhs in
+        abs(lhs.stationOrder - (target?.order ?? 1)) < abs(rhs.stationOrder - (target?.order ?? 1))
+      }
+      let remaining = max(0, (target?.order ?? 1) - (bus?.stationOrder ?? 1))
+      let attributes = NLBUSActivityAttributes(
+        lineName: line.name,
+        direction: line.direction,
+        targetStation: selectedStation,
+        accentHex: store.accent.rawValue
+      )
+      let state = NLBUSActivityAttributes.ContentState(
+        destination: line.destination,
+        nextStation: selectedStation,
+        remainingStops: remaining,
+        distanceText: bus?.distance.isEmpty == false ? bus!.distance : "实时跟踪",
+        vehicleNumber: bus?.busName ?? "待发车",
+        updatedAt: Date()
+      )
+      let activity = try Activity.request(attributes: attributes, contentState: state, pushType: nil)
+      Task { @MainActor in
+        for _ in 0..<240 {
+          try? await Task.sleep(nanoseconds: 15_000_000_000)
+          guard let refreshed = try? await store.loadRealtime(line: line, stationOrder: target?.order ?? 1) else { continue }
+          let latest = refreshed.buses.min { lhs, rhs in
+            abs(lhs.stationOrder - (target?.order ?? 1)) < abs(rhs.stationOrder - (target?.order ?? 1))
+          }
+          let latestRemaining = max(0, (target?.order ?? 1) - (latest?.stationOrder ?? 1))
+          let nextState = NLBUSActivityAttributes.ContentState(
+            destination: line.destination,
+            nextStation: selectedStation,
+            remainingStops: latestRemaining,
+            distanceText: latest?.distance.isEmpty == false ? latest!.distance : "实时跟踪",
+            vehicleNumber: latest?.busName ?? "待发车",
+            updatedAt: Date()
+          )
+          await activity.update(using: nextState)
+        }
+      }
+      store.message = "已创建 \(line.name) 实时活动。"
+      dismiss()
+    } catch {
+      store.message = error.localizedDescription
+    }
   }
 }
 
@@ -1306,6 +1416,7 @@ struct FullMapView: View {
   let stops: [RouteStop]
   let buses: [LiveBus]
   let nearbyStations: [NearbyStation]
+  let userCoordinate: CLLocationCoordinate2D?
   @State private var region = MKCoordinateRegion(
     center: CLLocationCoordinate2D(latitude: 25.431, longitude: 119.007),
     span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
@@ -1336,6 +1447,9 @@ struct FullMapView: View {
 
   private var pins: [MapPinItem] {
     var items: [MapPinItem] = []
+    if let userCoordinate {
+      items.append(MapPinItem(title: "我的位置", subtitle: "", coordinate: userCoordinate, systemImage: "location.fill"))
+    }
     items += stops.compactMap { stop in
       guard let coordinate = stop.coordinate else { return nil }
       return MapPinItem(title: stop.name, subtitle: "\(stop.order)", coordinate: coordinate, systemImage: "mappin")
@@ -1371,7 +1485,7 @@ struct MiniMapView: View {
   let buses: [LiveBus]
 
   var body: some View {
-    FullMapView(stops: stops, buses: buses, nearbyStations: [])
+    FullMapView(stops: stops, buses: buses, nearbyStations: [], userCoordinate: nil)
   }
 }
 
