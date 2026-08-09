@@ -22,6 +22,7 @@ jobs:
 
       - name: Build native iOS app without signing
         run: |
+          set -o pipefail
           xcodebuild \
             -project ios/Runner.xcodeproj \
             -scheme Runner \
@@ -31,7 +32,13 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            build 2>&1 | tee build/xcodebuild.log || BUILD_STATUS=$?
+          if [ "${BUILD_STATUS:-0}" -ne 0 ]; then
+            grep -E "(^| )error:|\.swift:[0-9]+:[0-9]+: error:" build/xcodebuild.log | tail -n 30 | while IFS= read -r line; do
+              echo "::error title=Xcode build error::$line"
+            done
+            exit "$BUILD_STATUS"
+          fi
 
       - name: Package unsigned IPA
         run: |
