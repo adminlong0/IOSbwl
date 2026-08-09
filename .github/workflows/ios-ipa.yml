@@ -34,10 +34,17 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee build/xcodebuild.log || BUILD_STATUS=$?
           if [ "${BUILD_STATUS:-0}" -ne 0 ]; then
+            sed -E $'s/\x1B\[[0-9;]*[mK]//g' build/xcodebuild.log > build/xcodebuild-clean.log
+            grep -iE "error|failed|embedded binary|multiple commands|validateembeddedbinary" build/xcodebuild-clean.log | tail -n 20 | while IFS= read -r line; do
+              line=${line//'%'/'%25'}
+              line=${line//$'\r'/'%0D'}
+              line=${line//$'\n'/'%0A'}
+              echo "::error title=Xcode build failure::$line"
+            done || true
             {
               echo '### Xcode diagnostic'
               echo '```text'
-              tail -n 180 build/xcodebuild.log
+              tail -n 180 build/xcodebuild-clean.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             exit "$BUILD_STATUS"
