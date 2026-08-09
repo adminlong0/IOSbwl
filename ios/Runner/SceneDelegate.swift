@@ -222,7 +222,7 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
           let stops = rows.enumerated().map { RouteStop(index: $0.offset, dictionary: $0.element) }
           routeGeometry[line.id] = geometry
           if !geometry.isEmpty {
-            routeStopGeometryIndices[line.id] = Dictionary(uniqueKeysWithValues: stops.compactMap { stop in
+            let indexPairs: [(Int, Int)] = stops.compactMap { stop -> (Int, Int)? in
               guard let coordinate = stop.coordinate else { return nil }
               let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
               guard let index = geometry.indices.min(by: { lhs, rhs in
@@ -232,7 +232,8 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
                   < location.distance(from: CLLocation(latitude: right.latitude, longitude: right.longitude))
               }) else { return nil }
               return (stop.order, index)
-            })
+            }
+            routeStopGeometryIndices[line.id] = Dictionary(uniqueKeysWithValues: indexPairs)
           }
           return stops
         }
