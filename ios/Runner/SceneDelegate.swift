@@ -215,7 +215,7 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
         let payload = try await api.request(["CMD": "103", "CITYNAME": cityName, "CITYKEY": cityKey, "LINENAME": line.name, "DIRECTION": direction])
         let rows = payload.arrayAny(["data", "list", "stations", "busstations", "stationList"])
         if !rows.isEmpty {
-          let geometry = payload.array("nihelist").compactMap { point in
+          let geometry: [CLLocationCoordinate2D] = payload.array("nihelist").compactMap { point -> CLLocationCoordinate2D? in
             guard let lat = Double(point.string("lat")), let lng = Double(point.string("lng")) else { return nil }
             return CLLocationCoordinate2D(latitude: lat, longitude: lng)
           }
