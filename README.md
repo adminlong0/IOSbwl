@@ -1,6 +1,6 @@
 # NLBUS
 
-NLBUS is a native iOS real-time bus app for Putian (`pt111601`). It rebuilds the MyGoLBS H5 transit experience as a SwiftUI app with Apple system controls instead of embedding the website.
+NLBUS is a three-platform real-time bus app for Putian (`pt111601`). The stable iOS app remains native SwiftUI, while Android 13+ and Web share a Flutter presentation and business layer so their information architecture, visual hierarchy, and interactions remain consistent.
 
 ## Current Experience
 
@@ -56,18 +56,36 @@ Core commands used:
 - `CMD=103` line details
 - `CMD=104` live vehicle data
 
-## Build IPA With GitHub Actions
+## Platform Builds
 
-Open the repository on GitHub, go to `Actions`, run `Build iOS IPA`, then download:
+- iOS: native SwiftUI, built with Xcode on macOS
+- Android: Flutter, minimum Android 13 (`minSdk 33`)
+- Web: Flutter responsive app, optimized for mobile and desktop browsers
 
-```text
-nlbus-unsigned-ipa
+The official API only returns readable JSON when requests carry its own H5 `Origin`. Native clients can reproduce that request context. Browsers cannot spoof `Origin`, so production Web deployments can pass a trusted same-origin proxy endpoint at build time:
+
+```bash
+flutter build web --release --dart-define=NLBUS_API_BASE=https://your-domain.example/api/transit
 ```
 
-The generated file is:
+Without a proxy, the Web UI remains available and offers the official page as the realtime-data fallback. No public third-party proxy is used.
+
+## Build With GitHub Actions
+
+Open the repository on GitHub, go to `Actions`, run `Build NLBUS Multi-platform`, then download:
+
+```text
+nlbus-ios-unsigned-ipa
+nlbus-android-apk
+nlbus-web-zip
+```
+
+The artifacts contain:
 
 ```text
 NLBUS-unsigned.ipa
+app-release.apk
+NLBUS-Web.zip
 ```
 
-Unsigned IPA files require manual signing before normal iPhone installation.
+The IPA is unsigned and requires manual signing before normal iPhone installation. The APK uses the repository's development release signing configuration and is suitable for direct testing, not Play Store publication.

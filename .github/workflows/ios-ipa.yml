@@ -1,26 +1,20 @@
-name: Build iOS IPA
+name: Build NLBUS Multi-platform
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
 
 jobs:
   build-ios-ipa:
-    name: Build unsigned IPA
+    name: iOS unsigned IPA
     runs-on: macos-15
     timeout-minutes: 45
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
-
-      - name: Build native iOS app without signing
+      - name: Build native iOS app
         run: |
           set -o pipefail
           mkdir -p build
@@ -36,22 +30,13 @@ jobs:
             build 2>&1 | tee build/xcodebuild.log || BUILD_STATUS=$?
           if [ "${BUILD_STATUS:-0}" -ne 0 ]; then
             sed -E $'s/\x1B\[[0-9;]*[mK]//g' build/xcodebuild.log > build/xcodebuild-clean.log
-            grep -iE "error|failed|embedded binary|multiple commands|validateembeddedbinary" build/xcodebuild-clean.log | tail -n 20 | while IFS= read -r line; do
-              line=${line//'%'/'%25'}
-              line=${line//$'\r'/'%0D'}
-              line=${line//$'\n'/'%0A'}
+            grep -iE "error|failed|embedded binary|multiple commands|validateembeddedbinary" build/xcodebuild-clean.log | tail -n 25 | while IFS= read -r line; do
+              line=${line//'%'/'%25'}; line=${line//$'\r'/'%0D'}; line=${line//$'\n'/'%0A'}
               echo "::error title=Xcode build failure::$line"
             done || true
-            {
-              echo '### Xcode diagnostic'
-              echo '```text'
-              tail -n 180 build/xcodebuild-clean.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
             exit "$BUILD_STATUS"
           fi
-
-      - name: Package unsigned IPA
+      - name: Package IPA
         run: |
           APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/NLBUS.app"
           test -d "$APP_PATH"
@@ -59,11 +44,61 @@ jobs:
           cp -R "$APP_PATH" build/ios/ipa/Payload/NLBUS.app
           cd build/ios/ipa
           zip -qry NLBUS-unsigned.ipa Payload
-
-      - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: nlbus-unsigned-ipa
+          name: nlbus-ios-unsigned-ipa
           path: build/ios/ipa/NLBUS-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+  build-android:
+    name: Android 13+ APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Resolve and verify
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+      - name: Build release APK
+        run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nlbus-android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  build-web:
+    name: Web release ZIP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build web release
+        run: |
+          flutter pub get
+          flutter build web --release
+          cd build/web
+          zip -qry ../NLBUS-Web.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nlbus-web-zip
+          path: build/NLBUS-Web.zip
           if-no-files-found: error
           retention-days: 14
