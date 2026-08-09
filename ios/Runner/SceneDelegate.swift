@@ -1,6 +1,7 @@
 import ActivityKit
 import CoreLocation
 import MapKit
+import SafariServices
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -41,6 +42,9 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
   @Published var isLoading = false
   @Published var userCoordinate: CLLocationCoordinate2D?
   @Published var selectedCityKey = "pt111601"
+  @Published var refreshInterval: Double = 2
+  @Published var stopLayout: StopLayout = .horizontal
+  @Published var customAccent = Color.green
 
   private let api = BusAPI()
   private var cityKey: String { selectedCityKey }
@@ -73,6 +77,22 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
     let keyword = mapFilter.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !keyword.isEmpty else { return allLines }
     return allLines.filter { $0.name.localizedCaseInsensitiveContains(keyword) || $0.destination.localizedCaseInsensitiveContains(keyword) }
+  }
+
+  var favoriteFirstLines: [BusLine] {
+    allLines.sorted {
+      let lhs = favoriteLineIDs.firstIndex(of: $0.id)
+      let rhs = favoriteLineIDs.firstIndex(of: $1.id)
+      if let lhs, let rhs { return lhs < rhs }
+      if lhs != nil { return true }
+      if rhs != nil { return false }
+      return $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+    }
+  }
+
+  func deleteSearchHistory(at offsets: IndexSet) {
+    searchHistory.remove(atOffsets: offsets)
+    savePreferences()
   }
 
   func loadCity() async {
@@ -227,6 +247,32 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
     throw lastError ?? BusError.message("当前线路暂无实时车辆")
   }
 
+  func loadTimetable(for line: BusLine) async throws -> [String] {
+    let detail = try await api.request([
+      "CMD": "103", "CITYNAME": cityName, "CITYKEY": cityKey,
+      "LINENAME": line.name, "DIRECTION": line.direction,
+    ])
+    let routeID = detail.stringAny(["routeId", "routeID", "routeid"], fallback: line.name)
+    let payload = try await api.request([
+      "CMD": "207", "CITYNAME": cityName, "CITYKEY": "",
+      "ROUTEID": routeID, "DIRECTION": line.direction,
+    ])
+    let rows = payload.arrayAny(["list", "data", "rows", "result"])
+    let values = rows.flatMap { row -> [String] in
+      let nested = row["times"] as? [Any] ?? []
+      let nestedValues = nested.compactMap { value -> String? in
+        if let value = value as? String { return value }
+        if let value = value as? [String: Any] {
+          return value.stringAny(["time", "planTime", "departTime", "value"], fallback: "")
+        }
+        return nil
+      }
+      let direct = row.stringAny(["time", "planTime", "departTime"], fallback: "")
+      return nestedValues + (direct.isEmpty ? [] : [direct])
+    }
+    return Array(Set(values.filter { !$0.isEmpty })).sorted()
+  }
+
   func loadStops(for lineName: String, direction: String) async throws -> [RouteStop] {
     let payload = try await api.request(["CMD": "103", "CITYNAME": cityName, "CITYKEY": cityKey, "LINENAME": lineName, "DIRECTION": direction])
     return payload.arrayAny(["data", "list", "stations", "busstations"]).enumerated().map { RouteStop(index: $0.offset, dictionary: $0.element) }
@@ -271,6 +317,8 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
     UserDefaults.standard.set(themeMode.rawValue, forKey: "themeMode")
     UserDefaults.standard.set(accent.rawValue, forKey: "accent")
     UserDefaults.standard.set(try? encoder.encode(quickLinks), forKey: "quickLinks")
+    UserDefaults.standard.set(refreshInterval, forKey: "refreshInterval")
+    UserDefaults.standard.set(stopLayout.rawValue, forKey: "stopLayout")
   }
 
   private func loadPreferences() {
@@ -291,12 +339,17 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
        let value = ThemeAccent(rawValue: raw) {
       accent = value
     }
+    let savedInterval = UserDefaults.standard.double(forKey: "refreshInterval")
+    refreshInterval = savedInterval > 0 ? savedInterval : 2
+    if let raw = UserDefaults.standard.string(forKey: "stopLayout"), let value = StopLayout(rawValue: raw) {
+      stopLayout = value
+    }
     if let data = UserDefaults.standard.data(forKey: "quickLinks"),
        var value = try? decoder.decode([QuickLink].self, from: data),
        !value.isEmpty {
       for index in value.indices where value[index].title.contains("莆田") {
-        value[index].url = "weixin://"
-        value[index].subtitle = "打开微信并搜索莆田市民卡"
+        value[index].url = "weixin://dl/business/?t=wsEoAa0Vyum"
+        value[index].subtitle = "打开莆田市民卡"
       }
       quickLinks = value
     }
@@ -306,12 +359,23 @@ final class BusStore: NSObject, ObservableObject, CLLocationManagerDelegate {
     var previews: [StationVehicle] = []
     for station in nearbyStations.prefix(3) {
       guard let line = try? await loadStationLines(stationName: station.name).first else { continue }
-      guard let snapshot = try? await loadRealtime(line: line, stationOrder: 1) else { continue }
+      let stops = (try? await loadStops(for: line)) ?? []
+      let target = stops.first(where: { $0.name == station.name }) ?? nearestStop(in: stops)
+      guard let snapshot = try? await loadRealtime(line: line, stationOrder: target?.order ?? 1) else { continue }
       for bus in snapshot.buses.prefix(1) {
         previews.append(StationVehicle(station: station.name, line: line, bus: bus))
       }
     }
     nearbyVehicles = Array(previews.prefix(3))
+  }
+
+  func nearestStop(in stops: [RouteStop]) -> RouteStop? {
+    guard let userCoordinate else { return stops.first }
+    let user = CLLocation(latitude: userCoordinate.latitude, longitude: userCoordinate.longitude)
+    return stops.compactMap { stop -> (RouteStop, CLLocationDistance)? in
+      guard let coordinate = stop.coordinate else { return nil }
+      return (stop, user.distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)))
+    }.min { $0.1 < $1.1 }?.0
   }
 
   nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
@@ -391,6 +455,10 @@ struct BusLine: Identifiable, Hashable, Codable {
   let mileage: String
   let remark: String
   let summary: String
+
+  var displayName: String {
+    destination.isEmpty ? name : "\(name)->\(destination)"
+  }
 
   init(dictionary: [String: Any]) {
     name = dictionary.string("lineName", fallback: dictionary.string("routeName", fallback: dictionary.string("name", fallback: "未知线路")))
@@ -531,6 +599,10 @@ enum ThemeAccent: String, CaseIterable, Codable, Identifiable {
   case orange
   case pink
   case graphite
+  case red
+  case cyan
+  case indigo
+  case mint
 
   var id: String { rawValue }
   var title: String {
@@ -540,6 +612,10 @@ enum ThemeAccent: String, CaseIterable, Codable, Identifiable {
     case .orange: return "日落橙"
     case .pink: return "荔枝粉"
     case .graphite: return "石墨灰"
+    case .red: return "醒目红"
+    case .cyan: return "清澈青"
+    case .indigo: return "靛青"
+    case .mint: return "薄荷"
     }
   }
   var color: Color {
@@ -549,8 +625,20 @@ enum ThemeAccent: String, CaseIterable, Codable, Identifiable {
     case .orange: return .orange
     case .pink: return .pink
     case .graphite: return .gray
+    case .red: return .red
+    case .cyan: return .cyan
+    case .indigo: return .indigo
+    case .mint: return .mint
     }
   }
+}
+
+enum StopLayout: String, CaseIterable, Codable, Identifiable {
+  case horizontal
+  case vertical
+  var id: String { rawValue }
+  var title: String { self == .horizontal ? "横向" : "纵向" }
+  var symbol: String { self == .horizontal ? "rectangle.split.3x1" : "list.bullet" }
 }
 
 struct QuickLink: Identifiable, Codable, Hashable {
@@ -562,7 +650,7 @@ struct QuickLink: Identifiable, Codable, Hashable {
 
   static let defaults = [
     QuickLink(id: UUID(), title: "Apple 钱包", subtitle: "打开系统钱包", url: "shoebox://", systemImage: "wallet.pass"),
-    QuickLink(id: UUID(), title: "莆田市民卡", subtitle: "打开微信并搜索莆田市民卡", url: "weixin://", systemImage: "creditcard"),
+    QuickLink(id: UUID(), title: "莆田市民卡", subtitle: "打开莆田市民卡", url: "weixin://dl/business/?t=wsEoAa0Vyum", systemImage: "creditcard"),
   ]
 }
 
@@ -699,7 +787,7 @@ struct HomeView: View {
           }
         } else if !store.searchHistory.isEmpty {
           Section("最近搜索") {
-            ForEach(store.searchHistory.prefix(5), id: \.self) { keyword in
+            ForEach(Array(store.searchHistory.prefix(5)), id: \.self) { keyword in
               Button {
                 store.searchText = keyword
                 Task { await store.search() }
@@ -707,14 +795,17 @@ struct HomeView: View {
                 Label(keyword, systemImage: "clock.arrow.circlepath")
               }
             }
+            .onDelete(perform: store.deleteSearchHistory)
           }
         }
 
-        Section {
-          Button {
-            store.requestNearbyStations()
-          } label: {
-            Label("刷新 500 米内站点", systemImage: "location.fill")
+        if !store.favoriteLines.isEmpty {
+          Section("收藏路线") {
+            ForEach(store.favoriteLines) { line in
+              NavigationLink(destination: LineDetailView(line: line).environmentObject(store)) {
+                LineRow(line: line, pinned: true)
+              }
+            }
           }
         }
 
@@ -738,7 +829,7 @@ struct HomeView: View {
             ForEach(store.nearbyVehicles) { item in
               NavigationLink(destination: LineDetailView(line: item.line, focusStationName: item.station).environmentObject(store)) {
                 VStack(alignment: .leading, spacing: 5) {
-                  Text(item.line.name).font(.headline)
+                  Text(item.line.displayName).font(.headline)
                   Text("\(item.station) · \(item.bus.busName)")
                     .foregroundColor(.secondary)
                   if !item.bus.distance.isEmpty {
@@ -755,6 +846,13 @@ struct HomeView: View {
       }
       .navigationTitle("附近")
       .refreshable { store.requestNearbyStations() }
+      .toolbar {
+        Button {
+          store.requestNearbyStations()
+        } label: {
+          Label("刷新", systemImage: "arrow.clockwise")
+        }
+      }
     }
   }
 
@@ -829,7 +927,11 @@ struct LineDetailView: View {
   @State private var buses: [LiveBus] = []
   @State private var selectedOrder = 1
   @State private var planTime = ""
+  @State private var timetable: [String] = []
   @State private var sortMode: VehicleSortMode = .arrival
+  @State private var selectedBus: LiveBus?
+  @State private var showingOfficialPage = false
+  @State private var showingFeedback = false
 
   init(line: BusLine, focusStationName: String? = nil) {
     self.line = line
@@ -841,7 +943,7 @@ struct LineDetailView: View {
     List {
       Section {
         VStack(alignment: .leading, spacing: 10) {
-          Text(currentLine.name).font(.title2.bold())
+          Text(currentLine.displayName).font(.title2.bold())
           if !currentLine.destination.isEmpty {
             Label("开往 \(currentLine.destination)", systemImage: "arrow.forward.circle")
               .foregroundColor(.secondary)
@@ -884,37 +986,73 @@ struct LineDetailView: View {
             .foregroundColor(.secondary)
         } else {
           ForEach(sortedBuses) { bus in
-            VehicleRow(bus: bus, selectedOrder: selectedOrder)
+            Button { selectedBus = bus } label: {
+              VehicleRow(bus: bus, selectedOrder: selectedOrder, stationName: selectedStationName)
+            }
           }
         }
       }
 
       Section("时刻表") {
-        Text(planTime.isEmpty ? "实时发车时间暂未返回，可下拉刷新。" : "当前最近发车：\(planTime)")
-          .foregroundColor(.secondary)
+        if timetable.isEmpty {
+          Text(planTime.isEmpty ? "实时发车时间暂未返回，可下拉刷新。" : "当前最近发车：\(planTime)")
+            .foregroundColor(.secondary)
+        } else {
+          LazyVGrid(columns: [GridItem(.adaptive(minimum: 68), spacing: 10)], spacing: 10) {
+            ForEach(timetable, id: \.self) { time in
+              Text(time).font(.callout.monospacedDigit()).frame(maxWidth: .infinity)
+            }
+          }
+          .padding(.vertical, 4)
+        }
       }
 
       Section("车辆实时地图") {
         MiniMapView(stops: stops, buses: buses)
           .frame(height: 220)
           .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        Link(destination: officialRealtimeURL) {
+        Button { showingOfficialPage = true } label: {
           Label("使用官方网页核对实时车辆", systemImage: "safari")
+        }
+        Button { showingFeedback = true } label: {
+          Label("路线反馈", systemImage: "phone.bubble")
         }
       }
 
       Section("站点列表") {
-        ForEach(stops) { stop in
-          Button {
-            selectedOrder = stop.order
-            Task { await loadRealtime() }
-          } label: {
-            StopRow(stop: stop, selectedOrder: selectedOrder, hasBus: buses.contains { $0.stationOrder == stop.order })
+        Picker("展示样式", selection: $store.stopLayout) {
+          ForEach(StopLayout.allCases) { layout in
+            Label(layout.title, systemImage: layout.symbol).tag(layout)
+          }
+        }
+        .pickerStyle(.segmented)
+        .onChange(of: store.stopLayout) { _ in store.savePreferences() }
+        if store.stopLayout == .horizontal {
+          ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 0) {
+              ForEach(stops) { stop in
+                HorizontalStopView(stop: stop, selectedOrder: selectedOrder, hasBus: buses.contains { $0.stationOrder == stop.order })
+                  .onTapGesture {
+                    selectedOrder = stop.order
+                    Task { await loadRealtime() }
+                  }
+              }
+            }
+            .padding(.vertical, 8)
+          }
+        } else {
+          ForEach(stops) { stop in
+            Button {
+              selectedOrder = stop.order
+              Task { await loadRealtime() }
+            } label: {
+              StopRow(stop: stop, selectedOrder: selectedOrder, hasBus: buses.contains { $0.stationOrder == stop.order })
+            }
           }
         }
       }
     }
-    .navigationTitle(currentLine.name)
+    .navigationTitle(currentLine.displayName)
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
       Button {
@@ -924,7 +1062,28 @@ struct LineDetailView: View {
       }
     }
     .task { await loadAll() }
+    .task(id: currentLine.id) {
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: UInt64(store.refreshInterval * 1_000_000_000))
+        guard !Task.isCancelled else { return }
+        await loadRealtime()
+      }
+    }
     .refreshable { await loadAll() }
+    .sheet(item: $selectedBus) { bus in
+      NavigationView {
+        FullMapView(stops: stops, buses: [bus], nearbyStations: [], userCoordinate: nil, focusCoordinate: bus.coordinate)
+          .navigationTitle(bus.busName)
+          .navigationBarTitleDisplayMode(.inline)
+      }
+    }
+    .sheet(isPresented: $showingOfficialPage) { SafariView(url: officialRealtimeURL).ignoresSafeArea() }
+    .alert("联系莆田公交运营热线？", isPresented: $showingFeedback) {
+      Button("取消", role: .cancel) {}
+      Button("拨打 0594-2296933") {
+        if let url = URL(string: "tel://05942296933") { UIApplication.shared.open(url) }
+      }
+    } message: { Text("将打开系统电话应用进行咨询。") }
   }
 
   private var operationTime: String {
@@ -952,6 +1111,10 @@ struct LineDetailView: View {
     }
   }
 
+  private var selectedStationName: String {
+    stops.first(where: { $0.order == selectedOrder })?.name ?? "当前站"
+  }
+
   private func switchDirection() {
     let nextDirection = currentLine.direction == "1" ? "2" : "1"
     if let match = store.allLines.first(where: { $0.name == currentLine.name && $0.direction == nextDirection }) {
@@ -968,9 +1131,10 @@ struct LineDetailView: View {
       stops = try await store.loadStops(for: currentLine)
       if let focus = focusStationName, let matched = stops.first(where: { $0.name == focus }) {
         selectedOrder = matched.order
-      } else if selectedOrder <= 0 {
-        selectedOrder = stops.first?.order ?? 1
+      } else if let nearest = store.nearestStop(in: stops) {
+        selectedOrder = nearest.order
       }
+      timetable = (try? await store.loadTimetable(for: currentLine)) ?? []
       await loadRealtime()
     } catch {
       store.message = error.localizedDescription
@@ -1030,7 +1194,7 @@ struct StationDetailView: View {
         } else {
           ForEach(vehicles) { item in
             VStack(alignment: .leading, spacing: 5) {
-              Text(item.line.name).font(.headline)
+              Text(item.line.displayName).font(.headline)
               Text(item.bus.busName)
                 .foregroundColor(.secondary)
               if !item.bus.distance.isEmpty {
@@ -1060,7 +1224,9 @@ struct StationDetailView: View {
       lines = try await store.loadStationLines(stationName: stationName)
       var nextVehicles: [StationVehicle] = []
       for line in lines.prefix(8) {
-        let snapshot = try await store.loadRealtime(line: line, stationOrder: 1)
+        let stops = try await store.loadStops(for: line)
+        let target = stops.first(where: { $0.name == stationName }) ?? store.nearestStop(in: stops)
+        let snapshot = try await store.loadRealtime(line: line, stationOrder: target?.order ?? 1)
         nextVehicles.append(contentsOf: snapshot.buses.map { StationVehicle(station: stationName, line: line, bus: $0) })
       }
       vehicles = nextVehicles.sorted { $0.bus.distance.numericValue < $1.bus.distance.numericValue }
@@ -1087,7 +1253,11 @@ struct TransitMapView: View {
           }
 
           Section("路线") {
-            ForEach(store.filteredLines) { line in
+            ForEach(store.filteredLines.sorted {
+              let lhs = store.favoriteLineIDs.contains($0.id)
+              let rhs = store.favoriteLineIDs.contains($1.id)
+              return lhs == rhs ? $0.displayName < $1.displayName : lhs
+            }) { line in
               Button {
                 selectedLine = line
                 Task { await load(line: line) }
@@ -1151,9 +1321,18 @@ struct SettingsView: View {
               .tag(accent)
             }
           }
+          ColorPicker("自定义颜色", selection: $store.customAccent, supportsOpacity: false)
+          VStack(alignment: .leading) {
+            Text("数据刷新间隔")
+            Slider(value: $store.refreshInterval, in: 2...30, step: 1)
+            Text("每 \(Int(store.refreshInterval)) 秒刷新")
+              .font(.caption)
+              .foregroundColor(.secondary)
+          }
         }
         .onChange(of: store.themeMode) { _ in store.savePreferences() }
         .onChange(of: store.accent) { _ in store.savePreferences() }
+        .onChange(of: store.refreshInterval) { _ in store.savePreferences() }
 
         Section("配置备份") {
           Button {
@@ -1177,7 +1356,14 @@ struct SettingsView: View {
             .textInputAutocapitalization(.never)
             .onSubmit { Task { await store.reloadCity() } }
           SettingsInfoRow(title: "开发者", value: "@奶龙")
-          SettingsInfoRow(title: "数据来源", value: "mygolbs 实时公交接口")
+          SettingsInfoRow(title: "免责声明", value: "数据仅供参考，具体请以实际为准。")
+        }
+
+        Section("离线数据") {
+          Label("线路与站点数据会在浏览时自动缓存", systemImage: "arrow.down.circle")
+          Text("受 Apple MapKit 限制，第三方应用不能下载 Apple 地图瓦片；离线时仍可查看已缓存的线路、站点与运营信息。")
+            .font(.caption)
+            .foregroundColor(.secondary)
         }
       }
       .navigationTitle("设置")
@@ -1214,6 +1400,11 @@ struct QuickActionSheet: View {
   @State private var selectedStation = ""
   @State private var notifyMode: NotifyMode = .stations
   @State private var notifyValue = 2
+  @State private var activityMode: ActivityDisplayMode = .liveActivity
+  @State private var activityStyle: ActivityCardStyle = .compact
+  @State private var showVehicleNumber = true
+  @State private var showDistance = true
+  @State private var enableRefreshAction = true
 
   var body: some View {
     NavigationView {
@@ -1238,8 +1429,8 @@ struct QuickActionSheet: View {
         Section("到站通知") {
           Picker("路线", selection: $selectedLine) {
             Text("选择路线").tag(Optional<BusLine>.none)
-            ForEach(store.allLines) { line in
-              Text(line.name).tag(Optional(line))
+            ForEach(store.favoriteFirstLines) { line in
+              Text(line.displayName).tag(Optional(line))
             }
           }
           if let selectedLine {
@@ -1264,6 +1455,21 @@ struct QuickActionSheet: View {
             Label("创建实时活动", systemImage: "rectangle.inset.filled.and.person.filled")
           }
           .disabled(selectedLine == nil || selectedStation.isEmpty)
+          Picker("展示模式", selection: $activityMode) {
+            ForEach(ActivityDisplayMode.allCases) { mode in Text(mode.title).tag(mode) }
+          }
+          Picker("卡片样式", selection: $activityStyle) {
+            ForEach(ActivityCardStyle.allCases) { style in Text(style.title).tag(style) }
+          }
+          Toggle("显示车辆编号", isOn: $showVehicleNumber)
+          Toggle("显示距离", isOn: $showDistance)
+          Toggle("显示刷新操作", isOn: $enableRefreshAction)
+          Button {
+            Task { await monitorCurrentRide() }
+          } label: {
+            Label("实时状态监测", systemImage: "location.viewfinder")
+          }
+          .disabled(selectedLine == nil)
         }
       }
       .navigationTitle("快捷操作")
@@ -1276,18 +1482,11 @@ struct QuickActionSheet: View {
 
   private func open(_ raw: String) {
     guard let url = URL(string: raw) else { return }
-    if raw == "weixin://" {
-      UIPasteboard.general.string = "莆田市民卡"
-      UIApplication.shared.open(url)
-      store.message = "已复制“莆田市民卡”，请在微信顶部搜索框粘贴搜索。"
-      dismiss()
+    if raw.hasPrefix("weixin://"), !UIApplication.shared.canOpenURL(url) {
+      store.message = "未检测到微信，请安装微信后重试。"
       return
     }
-    if raw.hasPrefix("weixin://"), !UIApplication.shared.canOpenURL(url) {
-      UIApplication.shared.open(URL(string: "https://wxmpurl.cn/vHnajJlAguq")!)
-    } else {
-      UIApplication.shared.open(url)
-    }
+    UIApplication.shared.open(url)
     dismiss()
   }
 
@@ -1312,6 +1511,10 @@ struct QuickActionSheet: View {
 
   @MainActor
   private func createLiveActivity() async {
+    if activityMode == .pictureInPicture {
+      store.message = "画中画需要持续的视频播放会话。为避免伪造后台播放，本版本不会以静态界面冒充画中画；请选择实时活动。"
+      return
+    }
     guard #available(iOS 16.1, *), ActivityAuthorizationInfo().areActivitiesEnabled else {
       store.message = "请在系统设置中允许 NLBUS 使用实时活动。"
       return
@@ -1326,7 +1529,7 @@ struct QuickActionSheet: View {
       }
       let remaining = max(0, (target?.order ?? 1) - (bus?.stationOrder ?? 1))
       let attributes = NLBUSActivityAttributes(
-        lineName: line.name,
+        lineName: line.displayName,
         direction: line.direction,
         targetStation: selectedStation,
         accentHex: store.accent.rawValue
@@ -1359,11 +1562,34 @@ struct QuickActionSheet: View {
           await activity.update(using: nextState)
         }
       }
-      store.message = "已创建 \(line.name) 实时活动。"
+      store.message = "已创建 \(line.displayName) 实时活动。"
       dismiss()
     } catch {
       store.message = error.localizedDescription
     }
+  }
+
+  @MainActor
+  private func monitorCurrentRide() async {
+    guard let line = selectedLine, let user = store.userCoordinate else {
+      store.message = "需要先选择线路并允许精确定位。"
+      return
+    }
+    do {
+      let stops = try await store.loadStops(for: line)
+      let target = store.nearestStop(in: stops)
+      let snapshot = try await store.loadRealtime(line: line, stationOrder: target?.order ?? 1)
+      let location = CLLocation(latitude: user.latitude, longitude: user.longitude)
+      let match = snapshot.buses.compactMap { bus -> (LiveBus, CLLocationDistance)? in
+        guard let coordinate = bus.coordinate else { return nil }
+        return (bus, location.distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)))
+      }.min { $0.1 < $1.1 }
+      if let match, match.1 <= 80 {
+        store.message = "检测到你可能正在乘坐 \(line.displayName)，车辆 \(match.0.busName)，定位误差约 \(Int(match.1)) 米。"
+      } else {
+        store.message = "暂未发现 80 米内与定位高度匹配的 \(line.displayName) 车辆。"
+      }
+    } catch { store.message = error.localizedDescription }
   }
 }
 
@@ -1412,11 +1638,40 @@ enum NotifyMode: String, CaseIterable, Identifiable {
   var unitSuffix: String { self == .distance ? " km" : " 站" }
 }
 
+enum ActivityDisplayMode: String, CaseIterable, Identifiable {
+  case liveActivity
+  case pictureInPicture
+  case both
+  var id: String { rawValue }
+  var title: String {
+    switch self {
+    case .liveActivity: return "纯实时活动"
+    case .pictureInPicture: return "纯画中画"
+    case .both: return "实时活动 + 画中画"
+    }
+  }
+}
+
+enum ActivityCardStyle: String, CaseIterable, Identifiable {
+  case compact
+  case detailed
+  case minimal
+  var id: String { rawValue }
+  var title: String {
+    switch self {
+    case .compact: return "紧凑"
+    case .detailed: return "详细"
+    case .minimal: return "极简"
+    }
+  }
+}
+
 struct FullMapView: View {
   let stops: [RouteStop]
   let buses: [LiveBus]
   let nearbyStations: [NearbyStation]
   let userCoordinate: CLLocationCoordinate2D?
+  var focusCoordinate: CLLocationCoordinate2D? = nil
   @State private var region = MKCoordinateRegion(
     center: CLLocationCoordinate2D(latitude: 25.431, longitude: 119.007),
     span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
@@ -1441,7 +1696,6 @@ struct FullMapView: View {
         }
       }
     }
-    .onChange(of: pins.count) { _ in recenter() }
     .onAppear { recenter() }
   }
 
@@ -1466,6 +1720,11 @@ struct FullMapView: View {
   }
 
   private func recenter() {
+    if let focusCoordinate {
+      region.center = focusCoordinate
+      region.span = MKCoordinateSpan(latitudeDelta: 0.012, longitudeDelta: 0.012)
+      return
+    }
     guard let first = pins.first else { return }
     region.center = first.coordinate
     region.span = MKCoordinateSpan(latitudeDelta: 0.04, longitudeDelta: 0.04)
@@ -1499,7 +1758,7 @@ struct LineRow: View {
         .foregroundColor(pinned ? .yellow : .green)
         .frame(width: 30, height: 30)
       VStack(alignment: .leading, spacing: 4) {
-        Text(line.name).font(.headline)
+        Text(line.displayName).font(.headline)
         if !line.destination.isEmpty {
           Text("开往 \(line.destination)").font(.subheadline).foregroundColor(.secondary)
         }
@@ -1526,6 +1785,7 @@ struct NearbyStationRow: View {
 struct VehicleRow: View {
   let bus: LiveBus
   let selectedOrder: Int
+  let stationName: String
 
   var body: some View {
     HStack(spacing: 12) {
@@ -1549,9 +1809,38 @@ struct VehicleRow: View {
 
   private var status: String {
     let delta = bus.stationOrder - selectedOrder
-    if delta == 0 { return "车辆在当前站附近" }
-    if delta > 0 { return "已过当前站 \(delta) 站" }
-    return "距离当前站约 \(abs(delta)) 站"
+    if delta == 0 { return "车辆在当前\(stationName)附近" }
+    if delta > 0 { return "已过当前\(stationName)约 \(delta) 站" }
+    return "距离当前\(stationName)约 \(abs(delta)) 站"
+  }
+}
+
+struct SafariView: UIViewControllerRepresentable {
+  let url: URL
+  func makeUIViewController(context: Context) -> SFSafariViewController { SFSafariViewController(url: url) }
+  func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
+}
+
+struct HorizontalStopView: View {
+  let stop: RouteStop
+  let selectedOrder: Int
+  let hasBus: Bool
+
+  var body: some View {
+    VStack(spacing: 7) {
+      ZStack {
+        Rectangle().fill(Color.secondary.opacity(0.25)).frame(width: 76, height: 3)
+        Circle().fill(selectedOrder == stop.order ? Color.accentColor : Color.secondary)
+          .frame(width: selectedOrder == stop.order ? 16 : 10, height: selectedOrder == stop.order ? 16 : 10)
+        if hasBus { Image(systemName: "bus.fill").font(.caption2).offset(y: -17).foregroundColor(.accentColor) }
+      }
+      Text(stop.name)
+        .font(selectedOrder == stop.order ? .caption.bold() : .caption)
+        .multilineTextAlignment(.center)
+        .frame(width: 76, height: 48, alignment: .top)
+      Text("\(stop.order)").font(.caption2.monospacedDigit()).foregroundColor(.secondary)
+    }
+    .contentShape(Rectangle())
   }
 }
 
